@@ -334,6 +334,9 @@ func scanWordsAlphaOnly(s string, out *[8]wordSpan) (int, bool) {
 }
 
 func fastParseEmbedded(s string, opts Options) (Result, bool) {
+	if r, ok := fastParseEmbeddedInDigits(s, opts); ok {
+		return r, true
+	}
 	sc := fastScan{s: s, n: len(s)}
 	for {
 		kind, lo, hi := sc.nextToken()
@@ -376,6 +379,73 @@ func fastParseEmbedded(s string, opts Options) (Result, bool) {
 		}
 		return Result{Time: shiftByUnitN(opts.Reference, unit, mul*n), Truncated: unit, Direction: dir}, true
 	}
+}
+
+func fastParseEmbeddedInDigits(s string, opts Options) (Result, bool) {
+	n := len(s)
+	for i := 0; i+3 < n; i++ {
+		if s[i] != ' ' {
+			continue
+		}
+		a := s[i+1] | 0x20
+		b := s[i+2] | 0x20
+		if a != 'i' || b != 'n' || s[i+3] != ' ' {
+			continue
+		}
+		j := i + 4
+		for j < n && s[j] == ' ' {
+			j++
+		}
+		if j >= n || !isDigit(s[j]) {
+			continue
+		}
+		val := 0
+		for j < n && isDigit(s[j]) {
+			val = val*10 + int(s[j]-'0')
+			j++
+		}
+		for j < n && s[j] == ' ' {
+			j++
+		}
+		if j >= n || !isAlpha(s[j]) {
+			continue
+		}
+		start := j
+		j++
+		for j < n && isAlpha(s[j]) {
+			j++
+		}
+		unit, ok := wordToUnit(s[start:j])
+		if !ok {
+			continue
+		}
+		for j < n && s[j] == ' ' {
+			j++
+		}
+		dir := Future
+		if j+2 < n && (s[j]|0x20) == 'a' && (s[j+1]|0x20) == 'g' && (s[j+2]|0x20) == 'o' {
+			dir = Past
+		} else if j+4 < n && (s[j]|0x20) == 'f' && (s[j+1]|0x20) == 'r' && (s[j+2]|0x20) == 'o' && (s[j+3]|0x20) == 'm' {
+			k := j + 4
+			for k < n && s[k] == ' ' {
+				k++
+			}
+			if k+2 < n && (s[k]|0x20) == 'n' && (s[k+1]|0x20) == 'o' && (s[k+2]|0x20) == 'w' {
+				// ok
+			} else if k+4 < n && (s[k]|0x20) == 't' && (s[k+1]|0x20) == 'o' && (s[k+2]|0x20) == 'd' &&
+				(s[k+3]|0x20) == 'a' && (s[k+4]|0x20) == 'y' {
+				// ok
+			} else {
+				// not a recognized suffix
+			}
+		}
+		mul := 1
+		if dir == Past {
+			mul = -1
+		}
+		return Result{Time: shiftByUnitN(opts.Reference, unit, mul*val), Truncated: unit, Direction: dir}, true
+	}
+	return Result{}, false
 }
 
 func parseNumberToken(s string, kind tokenKind, lo, hi int) (int, bool) {
