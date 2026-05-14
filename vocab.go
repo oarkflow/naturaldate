@@ -141,6 +141,11 @@ func wordToUnit(s string) (Unit, bool) {
 	return 0, false
 }
 
+// isBusinessDays returns true if the word is "business days"
+func isBusinessDays(s string) bool {
+	return eqLower(s, "business") || eqLower(s, "businessday") || eqLower(s, "businessdays")
+}
+
 // ampm returns 1 for am/a.m., 2 for pm/p.m., 0 if not an am/pm token.
 func wordToAMPM(s string) int {
 	switch {

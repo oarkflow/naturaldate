@@ -41,13 +41,14 @@ const (
 
 // Recurrence describes a repeating schedule.
 type Recurrence struct {
-	Every    Unit
-	Interval int   // every N <units>
-	At       Clock // optional time-of-day anchor (valid when HasAt is true)
-	HasAt    bool
-	OnDay    int8 // 0=any, 1=Mon … 7=Sun (ISO)
-	OnDate   int8 // day-of-month anchor (0=none)
-	OnMonth  int8 // month anchor (0=none)
+	Every     Unit // UnitSecond, UnitMinute, etc.
+	Interval  int  // every N <units>
+	At        Clock
+	HasAt     bool
+	OnDay     int8 // 0=any, 1=Mon … 7=Sun (ISO)
+	OnDate    int8 // day-of-month anchor (0=none)
+	OnMonth   int8 // month anchor (0=none)
+	OnOrdinal int8 // nth occurrence: 1=first, 2=second, ..., -1=last
 }
 
 // Clock is an optional time-of-day value stored without heap allocation.
@@ -61,6 +62,10 @@ type Options struct {
 	// Defaults to time.Now() when zero.
 	Reference time.Time
 
+	// Location is the timezone used for parsing calendar expressions.
+	// When set, Reference is converted into this location before parsing.
+	Location *time.Location
+
 	// Weekday preference: when a bare weekday name appears, prefer the
 	// nearest Past or Future occurrence. Default: Past.
 	WeekdayDir Direction
@@ -68,26 +73,27 @@ type Options struct {
 	// AllowEmbedded: when true, scan the whole input string for a date
 	// expression rather than requiring the whole string to be a date.
 	AllowEmbedded bool
+
+	// Holidays is a list of dates to skip when calculating business days.
+	// Each date should be in the format "YYYY-MM-DD" or as time.Time values.
+	Holidays []time.Time
 }
 
 // Parse parses a natural-language date/time expression.
 // It returns the Result and true on success, or a zero Result and false
 // on failure. No allocations are made during parsing.
 func Parse(s string, opts ...Options) (Result, bool) {
-	var options Options
-	if len(opts) > 0 {
-		options = opts[0]
+	options := normalizeOptions(firstOptions(opts))
+	if body, loc, ok := stripTimezoneSuffix(s); ok {
+		s = body
+		options.Location = loc
+		options.Reference = options.Reference.In(loc)
 	}
-	if options.Reference.IsZero() {
-		options.Reference = time.Now()
-	}
+
 	if r, ok := fastParse(s, options); ok {
 		return r, true
 	}
-	p := parser{src: s, ref: options.Reference, wdir: options.WeekdayDir}
-	if options.WeekdayDir == 0 {
-		p.wdir = Past
-	}
+	p := parser{src: s, ref: options.Reference, wdir: options.WeekdayDir, holidays: options.Holidays}
 	return p.parse(options.AllowEmbedded)
 }
 
@@ -100,27 +106,14 @@ func ParseAll(s string, opts ...Options) []Result {
 // AppendAll appends every date/time expression found in s to dst.
 // It is useful in hot paths where the caller wants to reuse result storage.
 func AppendAll(dst []Result, s string, opts ...Options) []Result {
-	var options Options
-	if len(opts) > 0 {
-		options = opts[0]
-	}
-	if options.Reference.IsZero() {
-		options.Reference = time.Now()
-	}
-	if options.WeekdayDir == 0 {
-		options.WeekdayDir = Past
-	}
-	p := parser{src: s, ref: options.Reference, wdir: options.WeekdayDir}
+	options := normalizeOptions(firstOptions(opts))
+	p := parser{src: s, ref: options.Reference, wdir: options.WeekdayDir, holidays: options.Holidays}
 	return p.parseAll(dst)
 }
 
 // MustParse is like Parse but panics on failure.
 func MustParse(s string, opts ...Options) Result {
-	var options Options
-	if len(opts) > 0 {
-		options = opts[0]
-	}
-	r, ok := Parse(s, options)
+	r, ok := Parse(s, opts...)
 	if !ok {
 		panic("naturaldate: cannot parse " + s)
 	}

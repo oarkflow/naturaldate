@@ -36,13 +36,15 @@ func fastParse(s string, opts Options) (Result, bool) {
 	case eqLower(s, "today"):
 		return Result{Time: startOfDay(ref), Truncated: UnitDay, Direction: Present}, true
 	case eqLower(s, "yesterday"):
-		return Result{Time: startOfDay(ref).AddDate(0, 0, -1), Truncated: UnitDay, Direction: Present}, true
+		return Result{Time: startOfDay(ref).AddDate(0, 0, -1), Truncated: UnitDay, Direction: Past}, true
 	case eqLower(s, "tomorrow"):
-		return Result{Time: startOfDay(ref).AddDate(0, 0, 1), Truncated: UnitDay, Direction: Present}, true
+		return Result{Time: startOfDay(ref).AddDate(0, 0, 1), Truncated: UnitDay, Direction: Future}, true
 	case eqLower(s, "midnight"):
-		return Result{Time: startOfDay(ref), Truncated: UnitHour, Direction: Present}, true
+		t := startOfDay(ref)
+		return Result{Time: t, Truncated: UnitHour, Direction: directionFromCompare(t, ref)}, true
 	case eqLower(s, "noon"):
-		return Result{Time: startOfDay(ref).Add(12 * time.Hour), Truncated: UnitHour, Direction: Present}, true
+		t := startOfDay(ref).Add(12 * time.Hour)
+		return Result{Time: t, Truncated: UnitHour, Direction: directionFromCompare(t, ref)}, true
 	}
 
 	if isDigit(s[0]) {

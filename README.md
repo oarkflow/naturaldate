@@ -80,6 +80,7 @@ func main() {
 | `three days ago` | 3 days before reference |
 | `one year from now` | 1 year after reference |
 | `in 2 weeks` | 2 weeks after reference |
+| `in 5 business days` | 5 weekdays after reference, skipping configured holidays |
 
 ### Weekday References
 
@@ -119,8 +120,8 @@ func main() {
 | `10am` | 10:00 of next day |
 | `10:05pm` | 22:05 of current/next day |
 | `10:05:22pm` | 22:05:22 |
-| `at midnight` | 00:00 |
-| `@noon` | 12:00 |
+| `midnight` | 00:00 of current day |
+| `noon` | 12:00 of current day |
 
 ### Numeric Dates
 
@@ -143,6 +144,34 @@ func main() {
 | `every monday` | Every Monday |
 | `every 2 weeks on friday` | Bi-weekly on Fridays |
 | `once a month on friday midnight` | Monthly on Friday at midnight |
+| `every first monday of the month` | First Monday of each month |
+| `every last friday of the month` | Last Friday of each month |
+
+### Timezones
+
+| Input | Description |
+|-------|-------------|
+| `tomorrow at 9am America/New_York` | Parse in an IANA timezone |
+| `now UTC+05:45` | Parse with a numeric UTC offset |
+| `tomorrow at 9am EST` | Parse with a fixed-offset abbreviation |
+
+## Grammar and Ambiguity Rules
+
+`naturaldate` intentionally uses a deterministic grammar. When an input is ambiguous, the parser follows these rules instead of guessing from locale or user history:
+
+- **Reference time**: all relative expressions are resolved from `Options.Reference`, or `time.Now()` when `Reference` is zero.
+- **Timezone precedence**: a trailing timezone suffix in the input wins over `Options.Location`; otherwise `Options.Location` wins over `Reference.Location()`.
+- **Strict by default**: `Parse` requires the whole input to be a date expression. Set `AllowEmbedded` to scan inside longer text.
+- **Bare weekdays**: a bare weekday like `monday` uses `Options.WeekdayDir`; the default is `Past`. If a time is attached and the past candidate is before the reference, it moves to the next future occurrence.
+- **`last`, `next`, and `this`**: `last` always points backward; `next` and `this` point forward.
+- **Bare times**: a standalone time like `10am` resolves to today only when it is after the reference; otherwise it resolves to tomorrow.
+- **Named month/day dates**: dates like `March 16` resolve to the same date when it is today, otherwise to the next valid future occurrence. Leap days search up to the next valid leap year.
+- **Numeric dates**: `YYYY-MM-DD` is treated as an absolute date. Two-part slash dates prefer US order (`MM/DD`); dash and dot dates prefer day/month order when both sides are ambiguous. If one side is greater than 12, it is treated as the day.
+- **Two-digit years**: numeric years below 100 are interpreted as 2000-based years, e.g. `03/16/26` means 2026.
+- **Relative suffixes**: `ago` means past. `from` is accepted only as `from now` or `from today`; incomplete forms like `5 days from` are rejected.
+- **Business days**: business-day expressions skip Saturdays, Sundays, and any dates in `Options.Holidays`.
+- **Recurrences**: recurring parses return the first occurrence strictly after the reference time. `Result.Next(after)` also returns the first occurrence strictly after `after`.
+- **Invalid values**: invalid calendar dates, invalid clock values, zero recurrence intervals, and unsupported trailing words are rejected.
 
 ## API Reference
 
@@ -208,6 +237,10 @@ type Options struct {
     // Defaults to time.Now() when zero.
     Reference time.Time
 
+    // Location is the timezone used for parsing calendar expressions.
+    // When set, Reference is converted into this location before parsing.
+    Location *time.Location
+
     // WeekdayDir is the direction preference when a bare weekday
     // name appears (e.g., "monday"). Default: Past.
     WeekdayDir Direction
@@ -215,6 +248,9 @@ type Options struct {
     // AllowEmbedded enables scanning the whole input string
     // for date expressions rather than requiring the whole string to be a date.
     AllowEmbedded bool
+
+    // Holidays contains dates to skip for business-day expressions.
+    Holidays []time.Time
 }
 ```
 

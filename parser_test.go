@@ -20,14 +20,17 @@ func TestParseCoreExamples(t *testing.T) {
 	}{
 		{"now", "now", opts, ref, UnitSecond, Present, false},
 		{"today", "today", opts, time.Date(2026, time.March, 16, 0, 0, 0, 0, time.UTC), UnitDay, Present, false},
-		{"yesterday", "yesterday", opts, time.Date(2026, time.March, 15, 0, 0, 0, 0, time.UTC), UnitDay, Present, false},
-		{"tomorrow", "tomorrow", opts, time.Date(2026, time.March, 17, 0, 0, 0, 0, time.UTC), UnitDay, Present, false},
+		{"yesterday", "yesterday", opts, time.Date(2026, time.March, 15, 0, 0, 0, 0, time.UTC), UnitDay, Past, false},
+		{"tomorrow", "tomorrow", opts, time.Date(2026, time.March, 17, 0, 0, 0, 0, time.UTC), UnitDay, Future, false},
 		{"5 minutes ago", "5 minutes ago", opts, ref.Add(-5 * time.Minute), UnitMinute, Past, false},
 		{"three days ago", "three days ago", opts, ref.AddDate(0, 0, -3), UnitDay, Past, false},
 		{"last month", "last month", opts, time.Date(2026, time.February, 1, 0, 0, 0, 0, time.UTC), UnitMonth, Past, false},
 		{"next month", "next month", opts, time.Date(2026, time.April, 1, 0, 0, 0, 0, time.UTC), UnitMonth, Future, false},
 		{"one year from now", "one year from now", opts, ref.AddDate(1, 0, 0), UnitYear, Future, false},
-		{"yesterday at 10am", "yesterday at 10am", opts, time.Date(2026, time.March, 15, 10, 0, 0, 0, time.UTC), UnitHour, Present, false},
+		{"midnight", "midnight", opts, time.Date(2026, time.March, 16, 0, 0, 0, 0, time.UTC), UnitHour, Past, false},
+		{"noon", "noon", opts, time.Date(2026, time.March, 16, 12, 0, 0, 0, time.UTC), UnitHour, Past, false},
+		{"yesterday at 10am", "yesterday at 10am", opts, time.Date(2026, time.March, 15, 10, 0, 0, 0, time.UTC), UnitHour, Past, false},
+		{"tomorrow at noon", "tomorrow at noon", opts, time.Date(2026, time.March, 17, 12, 0, 0, 0, time.UTC), UnitHour, Future, false},
 		{"last sunday at 5:30pm", "last sunday at 5:30pm", opts, time.Date(2026, time.March, 15, 17, 30, 0, 0, time.UTC), UnitDay, Past, false},
 		{"sunday at 22:45", "sunday at 22:45", opts, time.Date(2026, time.March, 22, 22, 45, 0, 0, time.UTC), UnitMinute, Future, false},
 		{"next January", "next January", opts, time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC), UnitMonth, Future, false},
@@ -167,6 +170,114 @@ func TestParseAllAndAppendAll(t *testing.T) {
 	}
 }
 
+func TestParseBusinessDays(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC) // Monday
+	opts := Options{Reference: ref}
+
+	cases := []struct {
+		input string
+		opts  Options
+		want  time.Time
+	}{
+		{"in 1 business day", opts, time.Date(2026, time.March, 17, 15, 4, 5, 0, time.UTC)},
+		{"in 5 business days", opts, time.Date(2026, time.March, 23, 15, 4, 5, 0, time.UTC)},
+		{"2 business days ago", opts, time.Date(2026, time.March, 12, 15, 4, 5, 0, time.UTC)},
+		{
+			"in 1 business day",
+			Options{
+				Reference: ref,
+				Holidays:  []time.Time{time.Date(2026, time.March, 17, 0, 0, 0, 0, time.UTC)},
+			},
+			time.Date(2026, time.March, 18, 15, 4, 5, 0, time.UTC),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			r, ok := Parse(tc.input, tc.opts)
+			if !ok {
+				t.Fatalf("expected parse success")
+			}
+			if !r.Time.Equal(tc.want) {
+				t.Fatalf("time mismatch: got %v want %v", r.Time, tc.want)
+			}
+			if r.Truncated != UnitDay {
+				t.Fatalf("unit mismatch: got %v want %v", r.Truncated, UnitDay)
+			}
+		})
+	}
+}
+
+func TestParseAmbiguityRules(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+
+	cases := []struct {
+		name  string
+		input string
+		opts  Options
+		want  time.Time
+		dir   Direction
+	}{
+		{
+			"slash prefers month day",
+			"03/04",
+			Options{Reference: ref},
+			time.Date(2027, time.March, 4, 0, 0, 0, 0, time.UTC),
+			Future,
+		},
+		{
+			"dash prefers day month",
+			"03-04",
+			Options{Reference: ref},
+			time.Date(2026, time.April, 3, 0, 0, 0, 0, time.UTC),
+			Future,
+		},
+		{
+			"dot prefers day month",
+			"03.04",
+			Options{Reference: ref},
+			time.Date(2026, time.April, 3, 0, 0, 0, 0, time.UTC),
+			Future,
+		},
+		{
+			"bare weekday defaults past",
+			"monday",
+			Options{Reference: ref},
+			time.Date(2026, time.March, 9, 0, 0, 0, 0, time.UTC),
+			Past,
+		},
+		{
+			"bare weekday can prefer future",
+			"monday",
+			Options{Reference: ref, WeekdayDir: Future},
+			time.Date(2026, time.March, 23, 0, 0, 0, 0, time.UTC),
+			Future,
+		},
+		{
+			"bare weekday with past time moves future",
+			"monday at 10am",
+			Options{Reference: ref},
+			time.Date(2026, time.March, 23, 10, 0, 0, 0, time.UTC),
+			Future,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := Parse(tc.input, tc.opts)
+			if !ok {
+				t.Fatalf("expected parse success")
+			}
+			if !r.Time.Equal(tc.want) {
+				t.Fatalf("time mismatch: got %v want %v", r.Time, tc.want)
+			}
+			if r.Direction != tc.dir {
+				t.Fatalf("direction mismatch: got %v want %v", r.Direction, tc.dir)
+			}
+		})
+	}
+}
+
 func TestParseInvalid(t *testing.T) {
 	if _, ok := Parse("not a date", Options{}); ok {
 		t.Fatalf("expected parse failure")
@@ -195,6 +306,9 @@ func TestParseRejectsInvalidCalendarAndClockValues(t *testing.T) {
 		"12:60pm",
 		"every 0 days",
 		"every month on 32",
+		"5 days from",
+		"in 5 days from",
+		"5 days from later",
 	}
 	for _, input := range cases {
 		t.Run(input, func(t *testing.T) {
@@ -237,6 +351,123 @@ func TestParseMonthDayWithTimeCanUseToday(t *testing.T) {
 	}
 	if want := time.Date(2026, time.March, 16, 19, 30, 0, 0, time.UTC); !r.Time.Equal(want) {
 		t.Fatalf("time mismatch: got %v want %v", r.Time, want)
+	}
+}
+
+func TestParseMonthDayCanUseTodayWithoutFutureJump(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	cases := []struct {
+		input string
+		want  time.Time
+		dir   Direction
+	}{
+		{"March 16", time.Date(2026, time.March, 16, 0, 0, 0, 0, time.UTC), Present},
+		{"03/16", time.Date(2026, time.March, 16, 0, 0, 0, 0, time.UTC), Present},
+		{"March 16 at 15:04:05", ref, Present},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			r, ok := Parse(tc.input, Options{Reference: ref})
+			if !ok {
+				t.Fatalf("expected parse success")
+			}
+			if !r.Time.Equal(tc.want) {
+				t.Fatalf("time mismatch: got %v want %v", r.Time, tc.want)
+			}
+			if r.Direction != tc.dir {
+				t.Fatalf("direction mismatch: got %v want %v", r.Direction, tc.dir)
+			}
+		})
+	}
+}
+
+func TestParseAbsoluteNumericDateDirection(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	cases := []struct {
+		input string
+		dir   Direction
+	}{
+		{"2025-12-25", Past},
+		{"2026-03-16 at 15:04:05", Present},
+		{"2026-12-25", Future},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			r, ok := Parse(tc.input, Options{Reference: ref})
+			if !ok {
+				t.Fatalf("expected parse success")
+			}
+			if r.Direction != tc.dir {
+				t.Fatalf("direction mismatch: got %v want %v", r.Direction, tc.dir)
+			}
+		})
+	}
+}
+
+func TestParseInLocation(t *testing.T) {
+	ny := MustLoadTimezone("America/New_York")
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+
+	r, ok := Parse("tomorrow at 9am", Options{Reference: ref, Location: ny})
+	if !ok {
+		t.Fatalf("expected parse success")
+	}
+	want := time.Date(2026, time.March, 17, 9, 0, 0, 0, ny)
+	if !r.Time.Equal(want) {
+		t.Fatalf("time mismatch: got %v want %v", r.Time, want)
+	}
+	if r.Time.Location() != ny {
+		t.Fatalf("location mismatch: got %v want %v", r.Time.Location(), ny)
+	}
+}
+
+func TestParseTimezoneSuffix(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+
+	r, ok := Parse("tomorrow at 9am America/New_York", Options{Reference: ref})
+	if !ok {
+		t.Fatalf("expected parse success")
+	}
+	if name := r.Time.Location().String(); name != "America/New_York" {
+		t.Fatalf("location mismatch: got %q", name)
+	}
+	if want := time.Date(2026, time.March, 17, 9, 0, 0, 0, MustLoadTimezone("America/New_York")); !r.Time.Equal(want) {
+		t.Fatalf("time mismatch: got %v want %v", r.Time, want)
+	}
+
+	r, ok = Parse("now UTC+05:45", Options{Reference: ref})
+	if !ok {
+		t.Fatalf("expected offset timezone parse success")
+	}
+	_, offset := r.Time.Zone()
+	if offset != 5*3600+45*60 {
+		t.Fatalf("offset mismatch: got %d", offset)
+	}
+	if !r.Time.Equal(ref) {
+		t.Fatalf("instant mismatch: got %v want %v", r.Time, ref)
+	}
+}
+
+func TestTimezoneHelpers(t *testing.T) {
+	loc, err := LoadTimezone("+05:45")
+	if err != nil {
+		t.Fatalf("expected offset timezone: %v", err)
+	}
+	_, offset := time.Date(2026, time.March, 16, 12, 0, 0, 0, loc).Zone()
+	if offset != 5*3600+45*60 {
+		t.Fatalf("offset mismatch: got %d", offset)
+	}
+
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	converted, err := ConvertTimezone(ref, "Asia/Kathmandu")
+	if err != nil {
+		t.Fatalf("expected conversion success: %v", err)
+	}
+	if name := converted.Location().String(); name != "Asia/Kathmandu" {
+		t.Fatalf("location mismatch: got %q", name)
+	}
+	if !converted.Equal(ref) {
+		t.Fatalf("conversion changed instant: got %v want %v", converted, ref)
 	}
 }
 
@@ -307,5 +538,77 @@ func BenchmarkAppendAll(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		dst = dst[:0]
 		dst = AppendAll(dst, input, opts)
+	}
+}
+
+func TestParseTimeBoundaries(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	opts := Options{Reference: ref}
+
+	cases := []struct {
+		name  string
+		input string
+		want  time.Time
+	}{
+		{"start of day", "start of day", time.Date(2026, time.March, 16, 0, 0, 0, 0, time.UTC)},
+		{"start of week", "start of week", time.Date(2026, time.March, 15, 0, 0, 0, 0, time.UTC)},
+		{"start of month", "start of month", time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)},
+		{"start of year", "start of year", time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)},
+		{"end of day", "end of day", time.Date(2026, time.March, 16, 23, 59, 59, 999999999, time.UTC)},
+		{"end of week", "end of week", time.Date(2026, time.March, 21, 23, 59, 59, 999999999, time.UTC)},
+		{"end of month", "end of month", time.Date(2026, time.March, 31, 23, 59, 59, 999999999, time.UTC)},
+		{"end of year", "end of year", time.Date(2026, time.December, 31, 23, 59, 59, 999999999, time.UTC)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := Parse(tc.input, opts)
+			if !ok {
+				t.Fatalf("expected parse success")
+			}
+			if !r.Time.Equal(tc.want) {
+				t.Fatalf("time mismatch: got %v want %v", r.Time, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseEnhancedRecurring(t *testing.T) {
+	ref := time.Date(2026, time.March, 10, 15, 4, 5, 0, time.UTC)
+
+	{
+		r, ok := Parse("every first monday of the month", Options{Reference: ref})
+		if !ok || !r.HasRecur {
+			t.Fatalf("expected recurring parse for 'first monday of the month'")
+		}
+		if r.Recur.OnDay != 1 {
+			t.Fatalf("expected OnDay=1 (Monday), got %d", r.Recur.OnDay)
+		}
+		if r.Recur.OnOrdinal != 1 {
+			t.Fatalf("expected OnOrdinal=1 (first), got %d", r.Recur.OnOrdinal)
+		}
+		// First Monday on or after March 10 is April 6
+		want := time.Date(2026, time.April, 6, 0, 0, 0, 0, time.UTC)
+		if !r.Time.Equal(want) {
+			t.Fatalf("time mismatch: got %v want %v", r.Time, want)
+		}
+	}
+
+	{
+		r, ok := Parse("every last friday of the month", Options{Reference: ref})
+		if !ok || !r.HasRecur {
+			t.Fatalf("expected recurring parse for 'last friday of the month'")
+		}
+		if r.Recur.OnDay != 5 {
+			t.Fatalf("expected OnDay=5 (Friday), got %d", r.Recur.OnDay)
+		}
+		if r.Recur.OnOrdinal != -1 {
+			t.Fatalf("expected OnOrdinal=-1 (last), got %d", r.Recur.OnOrdinal)
+		}
+		// Last Friday of March 2026 is March 27
+		want := time.Date(2026, time.March, 27, 0, 0, 0, 0, time.UTC)
+		if !r.Time.Equal(want) {
+			t.Fatalf("time mismatch: got %v want %v", r.Time, want)
+		}
 	}
 }
