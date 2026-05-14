@@ -183,6 +183,9 @@ func fastParseRecurring(s string, opts Options) (Result, bool) {
 	} else {
 		return Result{}, false
 	}
+	if recur.Interval < 1 {
+		return Result{}, false
+	}
 
 	// optional "on [the] <weekday|ordinal>"
 	mark := sc.i
@@ -199,12 +202,19 @@ func fastParseRecurring(s string, opts Options) (Result, bool) {
 			if wd, ok := wordToWeekday(s[l3:h3]); ok {
 				recur.OnDay = weekdayToISO(wd)
 			} else if n, ok := wordToInt(s[l3:h3]); ok {
+				if n < 1 || n > 31 {
+					return Result{}, false
+				}
 				recur.OnDate = int8(n)
 			} else {
 				return Result{}, false
 			}
 		case tokNumber, tokOrdinal:
-			recur.OnDate = int8(atoi(s[l3:h3]))
+			day := atoi(s[l3:h3])
+			if day < 1 || day > 31 {
+				return Result{}, false
+			}
+			recur.OnDate = int8(day)
 		default:
 			return Result{}, false
 		}
@@ -231,6 +241,10 @@ func fastParseRecurring(s string, opts Options) (Result, bool) {
 		recur.HasAt = true
 	} else {
 		sc.i = mark
+	}
+
+	if !sc.atEnd() {
+		return Result{}, false
 	}
 
 	next := nextOccurrenceFrom(opts.Reference, &recur)
@@ -297,10 +311,15 @@ func fastParseRecurringWords(s string, opts Options) (Result, bool) {
 		if eqLower(w, "midnight") {
 			recur.At = Clock{Hour: 0, Min: 0, Sec: 0}
 			recur.HasAt = true
+			i++
 		} else if eqLower(w, "noon") {
 			recur.At = Clock{Hour: 12, Min: 0, Sec: 0}
 			recur.HasAt = true
+			i++
 		}
+	}
+	if i != nw {
+		return Result{}, false
 	}
 
 	next := nextOccurrenceFrom(opts.Reference, &recur)
@@ -331,6 +350,11 @@ func scanWordsAlphaOnly(s string, out *[8]wordSpan) (int, bool) {
 		n++
 	}
 	return n, true
+}
+
+func (sc *fastScan) atEnd() bool {
+	kind, _, _ := sc.nextToken()
+	return kind == tokEOF
 }
 
 func fastParseEmbedded(s string, opts Options) (Result, bool) {
@@ -594,7 +618,14 @@ func parseClockFast(s string) (hour, min, sec int, unit Unit, ok bool) {
 		}
 	}
 
-	if h > 23 || min > 59 || sec > 59 {
+	if min > 59 || sec > 59 {
+		return 0, 0, 0, 0, false
+	}
+	if ampm != 0 {
+		if h < 1 || h > 12 {
+			return 0, 0, 0, 0, false
+		}
+	} else if h > 23 {
 		return 0, 0, 0, 0, false
 	}
 	if ampm == 1 && h == 12 {

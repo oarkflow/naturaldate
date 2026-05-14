@@ -13,13 +13,13 @@ type parser struct {
 
 func (p *parser) parse(embedded bool) (Result, bool) {
 	p.lex.init(p.src)
-	if r, ok := p.parseExpr(); ok {
+	if r, ok := p.parseExpr(embedded); ok && (embedded || p.lex.atEnd()) {
 		return r, true
 	}
 	if embedded {
 		for start := 1; start < p.lex.n; start++ {
 			p.lex.reset(start)
-			if r, ok := p.parseExpr(); ok {
+			if r, ok := p.parseExpr(true); ok {
 				return r, true
 			}
 		}
@@ -27,7 +27,7 @@ func (p *parser) parse(embedded bool) (Result, bool) {
 	return Result{}, false
 }
 
-func (p *parser) parseExpr() (Result, bool) {
+func (p *parser) parseExpr(embedded bool) (Result, bool) {
 	mark := p.lex.mark()
 
 	if r, ok := p.parseRecurring(); ok {
@@ -35,7 +35,7 @@ func (p *parser) parseExpr() (Result, bool) {
 	}
 	p.lex.reset(mark)
 
-	if r, ok := p.parseRelative(); ok {
+	if r, ok := p.parseRelative(embedded); ok {
 		return r, true
 	}
 	p.lex.reset(mark)
@@ -230,9 +230,11 @@ func (p *parser) parseBareWeekday() (Result, bool) {
 
 // ── relative ───────────────────────────────────────────────────────────────
 
-func (p *parser) parseRelative() (Result, bool) {
+func (p *parser) parseRelative(embedded bool) (Result, bool) {
 	mark := p.lex.mark()
-	p.skipToQuantity()
+	if embedded {
+		p.skipToQuantity()
+	}
 	if p.lex.remaining() == 0 {
 		p.lex.reset(mark)
 		return Result{}, false
@@ -291,13 +293,10 @@ func (p *parser) parseMonthDay() (Result, bool) {
 	if !ok {
 		return Result{}, false
 	}
-	y := p.ref.Year()
-	base := time.Date(y, mon, day, 0, 0, 0, 0, p.ref.Location())
-	if !base.After(p.ref) {
-		base = time.Date(y+1, mon, day, 0, 0, 0, 0, p.ref.Location())
-	}
-	if clk, ok := p.parseAtTime(); ok {
-		base = setClock(base, clk)
+	clk, hasClock := p.parseAtTime()
+	base, ok := nextMonthDay(p.ref, mon, day, clk, hasClock)
+	if !ok {
+		return Result{}, false
 	}
 	return Result{Time: base, Truncated: UnitDay, Direction: Future}, true
 }
@@ -328,13 +327,10 @@ func (p *parser) parseOrdinalOfMonth() (Result, bool) {
 	}
 	p.lex.next()
 
-	y := p.ref.Year()
-	base := time.Date(y, mon, day, 0, 0, 0, 0, p.ref.Location())
-	if !base.After(p.ref) {
-		base = time.Date(y+1, mon, day, 0, 0, 0, 0, p.ref.Location())
-	}
-	if clk, ok := p.parseAtTime(); ok {
-		base = setClock(base, clk)
+	clk, hasClock := p.parseAtTime()
+	base, ok := nextMonthDay(p.ref, mon, day, clk, hasClock)
+	if !ok {
+		return Result{}, false
 	}
 	return Result{Time: base, Truncated: UnitDay, Direction: Future}, true
 }
@@ -380,13 +376,10 @@ func (p *parser) parseNumericDate() (Result, bool) {
 		if !ok {
 			return Result{}, false
 		}
-		y := p.ref.Year()
-		base := time.Date(y, time.Month(m), d, 0, 0, 0, 0, p.ref.Location())
-		if !base.After(p.ref) {
-			base = time.Date(y+1, time.Month(m), d, 0, 0, 0, 0, p.ref.Location())
-		}
-		if clk, ok := p.parseAtTime(); ok {
-			base = setClock(base, clk)
+		clk, hasClock := p.parseAtTime()
+		base, ok := nextMonthDay(p.ref, time.Month(m), d, clk, hasClock)
+		if !ok {
+			return Result{}, false
 		}
 		return Result{Time: base, Truncated: UnitDay, Direction: Future}, true
 	}
@@ -413,7 +406,7 @@ func (p *parser) parseNumericDate() (Result, bool) {
 	if y < 100 {
 		y += 2000
 	}
-	if m < 1 || m > 12 || d < 1 || d > 31 {
+	if m < 1 || m > 12 || !validMonthDay(y, time.Month(m), d) {
 		return Result{}, false
 	}
 	base := time.Date(y, time.Month(m), d, 0, 0, 0, 0, p.ref.Location())
@@ -480,8 +473,11 @@ func (p *parser) parseRecurring() (Result, bool) {
 		p.lex.next()
 		recur.Every = UnitWeek
 		recur.Interval = 1
-		recur.OnDay = int8(wd)
+		recur.OnDay = weekdayToISO(wd)
 	} else {
+		return Result{}, false
+	}
+	if recur.Interval < 1 {
 		return Result{}, false
 	}
 
@@ -495,7 +491,12 @@ func (p *parser) parseRecurring() (Result, bool) {
 			p.lex.next()
 			recur.OnDay = weekdayToISO(wd)
 		} else if day, ok := p.parseOrdinalOrNumber(); ok {
+			if day < 1 || day > 31 {
+				return Result{}, false
+			}
 			recur.OnDate = int8(day)
+		} else {
+			return Result{}, false
 		}
 	}
 
@@ -598,7 +599,14 @@ func (p *parser) parseClockExpr() (clockResult, bool) {
 			p.lex.next()
 		}
 	}
-	if h > 23 || min > 59 || sec > 59 {
+	if min > 59 || sec > 59 {
+		return clockResult{}, false
+	}
+	if ampm != 0 {
+		if h < 1 || h > 12 {
+			return clockResult{}, false
+		}
+	} else if h > 23 {
 		return clockResult{}, false
 	}
 	if ampm == 1 && h == 12 {
@@ -709,6 +717,18 @@ func (p *parser) skipWords(words ...string) {
 	}
 }
 
+func (l *lexer) atEnd() bool {
+	for l.pos < l.n {
+		switch l.tokens[l.pos].kind {
+		case tokComma:
+			l.pos++
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // ── calendar helpers ───────────────────────────────────────────────────────
 
 func startOfDay(t time.Time) time.Time {
@@ -723,6 +743,30 @@ func startOfMonth(t time.Time) time.Time {
 
 func startOfYear(t time.Time) time.Time {
 	return time.Date(t.Year(), time.January, 1, 0, 0, 0, 0, t.Location())
+}
+
+func validMonthDay(year int, month time.Month, day int) bool {
+	if month < time.January || month > time.December || day < 1 {
+		return false
+	}
+	t := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	return t.Year() == year && t.Month() == month && t.Day() == day
+}
+
+func nextMonthDay(ref time.Time, month time.Month, day int, clk clockResult, hasClock bool) (time.Time, bool) {
+	for y := ref.Year(); y <= ref.Year()+8; y++ {
+		if !validMonthDay(y, month, day) {
+			continue
+		}
+		base := time.Date(y, month, day, 0, 0, 0, 0, ref.Location())
+		if hasClock {
+			base = setClock(base, clk)
+		}
+		if base.After(ref) {
+			return base, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func nearestWeekday(ref time.Time, wd time.Weekday, dir Direction) time.Time {
@@ -775,6 +819,12 @@ func nextOccurrenceFrom(ref time.Time, r *Recurrence) time.Time {
 	case UnitMonth:
 		t := startOfMonth(ref).AddDate(0, r.Interval, 0)
 		if r.OnDate != 0 {
+			for i := 0; i < 120 && !validMonthDay(t.Year(), t.Month(), int(r.OnDate)); i++ {
+				t = t.AddDate(0, r.Interval, 0)
+			}
+			if !validMonthDay(t.Year(), t.Month(), int(r.OnDate)) {
+				return ref
+			}
 			t = time.Date(t.Year(), t.Month(), int(r.OnDate), 0, 0, 0, 0, ref.Location())
 		} else if r.OnDay != 0 {
 			t = nearestWeekday(t, isoToWeekday(r.OnDay), Future)

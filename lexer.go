@@ -4,31 +4,31 @@ package naturaldate
 type tokenKind uint8
 
 const (
-	tokEOF tokenKind = iota
-	tokWord            // alphabetic run
-	tokNumber          // digit run
-	tokOrdinal         // 1st 2nd 3rd … (digit run + st/nd/rd/th)
-	tokColon           // :
-	tokAt              // at / @
-	tokComma           // ,
-	tokSlash           // /
-	tokDash            // -
-	tokDot             // .
+	tokEOF     tokenKind = iota
+	tokWord              // alphabetic run
+	tokNumber            // digit run
+	tokOrdinal           // 1st 2nd 3rd … (digit run + st/nd/rd/th)
+	tokColon             // :
+	tokAt                // at / @
+	tokComma             // ,
+	tokSlash             // /
+	tokDash              // -
+	tokDot               // .
 )
 
 type token struct {
 	kind tokenKind
-	lo   uint8 // start index in src (max 255 chars — enough for phrases)
-	hi   uint8 // exclusive end
+	lo   int // start index in src
+	hi   int // exclusive end
 }
 
 // lexer tokenises a short natural-language string without any heap allocation.
 // It works directly on a string slice so there is zero copying.
 type lexer struct {
 	src    string
-	tokens [32]token // fixed-size ring — natural date phrases are short
-	n      int       // number of valid tokens
-	pos    int       // read cursor into tokens[]
+	tokens [128]token // fixed-size buffer for short phrases and embedded snippets
+	n      int        // number of valid tokens
+	pos    int        // read cursor into tokens[]
 }
 
 func (l *lexer) init(s string) {
@@ -61,7 +61,7 @@ func (l *lexer) scan() {
 			for i < slen && isAlpha(src[i]) {
 				i++
 			}
-			buf[n] = token{tokWord, uint8(start), uint8(i)}
+			buf[n] = token{tokWord, start, i}
 			n++
 
 		case isDigit(c):
@@ -72,34 +72,34 @@ func (l *lexer) scan() {
 			if i+1 < slen && isAlpha(src[i]) && isAlpha(src[i+1]) &&
 				isOrdinalSuffix(src[i], src[i+1]) {
 				i += 2
-				buf[n] = token{tokOrdinal, uint8(start), uint8(i)}
+				buf[n] = token{tokOrdinal, start, i}
 			} else {
-				buf[n] = token{tokNumber, uint8(start), uint8(i)}
+				buf[n] = token{tokNumber, start, i}
 			}
 			n++
 
 		case c == ':':
-			buf[n] = token{tokColon, uint8(i), uint8(i + 1)}
+			buf[n] = token{tokColon, i, i + 1}
 			n++
 			i++
 		case c == '@':
-			buf[n] = token{tokAt, uint8(i), uint8(i + 1)}
+			buf[n] = token{tokAt, i, i + 1}
 			n++
 			i++
 		case c == ',':
-			buf[n] = token{tokComma, uint8(i), uint8(i + 1)}
+			buf[n] = token{tokComma, i, i + 1}
 			n++
 			i++
 		case c == '/':
-			buf[n] = token{tokSlash, uint8(i), uint8(i + 1)}
+			buf[n] = token{tokSlash, i, i + 1}
 			n++
 			i++
 		case c == '-':
-			buf[n] = token{tokDash, uint8(i), uint8(i + 1)}
+			buf[n] = token{tokDash, i, i + 1}
 			n++
 			i++
 		case c == '.':
-			buf[n] = token{tokDot, uint8(i), uint8(i + 1)}
+			buf[n] = token{tokDot, i, i + 1}
 			n++
 			i++
 		default:
@@ -157,7 +157,7 @@ func (l *lexer) wordEq(t token, s string) bool {
 func (l *lexer) remaining() int { return l.n - l.pos }
 
 // save / restore position for backtracking
-func (l *lexer) mark() int  { return l.pos }
+func (l *lexer) mark() int   { return l.pos }
 func (l *lexer) reset(m int) { l.pos = m }
 
 // ── character helpers ──────────────────────────────────────────────────────

@@ -12,7 +12,7 @@
   </a>
 </p>
 
-A high-performance, zero-allocation Go library for parsing natural language date and time expressions. It supports absolute dates, relative expressions, recurring schedules, and embedded date extraction from free-form text.
+A high-performance, zero-allocation Go library for parsing natural language date and time expressions. It supports absolute dates, relative expressions, recurring schedules, and optional embedded date extraction from free-form text.
 
 ## Features
 
@@ -44,14 +44,14 @@ func main() {
 	// Basic parsing
 	result, ok := naturaldate.Parse("yesterday", naturaldate.Options{})
 	if ok {
-		fmt.Println(result.Time) // 2026-03-15 00:00:00
+		fmt.Println(result.Time)
 	}
 
 	// With reference time (default is time.Now())
 	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
 	result, ok = naturaldate.Parse("5 minutes ago", naturaldate.Options{Reference: ref})
 	if ok {
-		fmt.Println(result.Time) // 2026-03-16 15:04:05 +0000 UTC
+		fmt.Println(result.Time) // 2026-03-16 14:59:05 +0000 UTC
 	}
 
 	// MustParse panics on failure
@@ -152,7 +152,7 @@ func main() {
 func Parse(s string, opts ...Options) (Result, bool)
 ```
 
-Parses a natural language date string. Returns the parsed result and a boolean indicating success.
+Parses a natural language date string. Returns the parsed result and a boolean indicating success. By default, the full input must be a date expression; use `AllowEmbedded` to scan inside longer text.
 
 ```go
 result, ok := naturaldate.Parse("yesterday")
@@ -239,6 +239,16 @@ opts := naturaldate.Options{Reference: ref, AllowEmbedded: true}
 result, ok := naturaldate.Parse("restart the server in 5 days from now", opts)
 // result.Time = 2026-03-21 (5 days from reference)
 ```
+
+## Production Notes
+
+- Invalid calendar dates are rejected rather than normalized.
+- Long embedded inputs are supported with fixed-size token storage and no heap allocations.
+- CI runs tests and `go vet` on the oldest supported Go version and the current stable release.
+
+## License
+
+MIT
 
 ## Performance
 

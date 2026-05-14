@@ -121,6 +121,90 @@ func TestParseInvalid(t *testing.T) {
 	}
 }
 
+func TestParseStrictRequiresWholeExpression(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	if _, ok := Parse("Restart the server in 5 days from now", Options{Reference: ref}); ok {
+		t.Fatalf("expected embedded phrase to fail without AllowEmbedded")
+	}
+	if _, ok := Parse("now tomorrow", Options{Reference: ref}); ok {
+		t.Fatalf("expected trailing date tokens to fail")
+	}
+	if _, ok := Parse("every day later", Options{Reference: ref}); ok {
+		t.Fatalf("expected trailing recurrence tokens to fail")
+	}
+}
+
+func TestParseRejectsInvalidCalendarAndClockValues(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	cases := []string{
+		"February 30",
+		"2026-02-29",
+		"13pm",
+		"12:60pm",
+		"every 0 days",
+		"every month on 32",
+	}
+	for _, input := range cases {
+		t.Run(input, func(t *testing.T) {
+			if _, ok := Parse(input, Options{Reference: ref}); ok {
+				t.Fatalf("expected parse failure")
+			}
+		})
+	}
+}
+
+func TestParseLongInputDoesNotWrapOffsets(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	prefix := "this sentence is intentionally long enough to exceed two hundred and fifty five bytes before the useful date phrase appears, so the lexer must keep real integer offsets instead of wrapping byte positions through a narrow field and slicing the wrong span later in the parse "
+	input := prefix + "in 5 days"
+	r, ok := Parse(input, Options{Reference: ref, AllowEmbedded: true})
+	if !ok {
+		t.Fatalf("expected embedded parse success")
+	}
+	if want := ref.AddDate(0, 0, 5); !r.Time.Equal(want) {
+		t.Fatalf("time mismatch: got %v want %v", r.Time, want)
+	}
+}
+
+func TestParseMonthDayChoosesNextValidFutureDate(t *testing.T) {
+	ref := time.Date(2025, time.March, 16, 15, 4, 5, 0, time.UTC)
+	r, ok := Parse("February 29", Options{Reference: ref})
+	if !ok {
+		t.Fatalf("expected leap day parse success")
+	}
+	if want := time.Date(2028, time.February, 29, 0, 0, 0, 0, time.UTC); !r.Time.Equal(want) {
+		t.Fatalf("time mismatch: got %v want %v", r.Time, want)
+	}
+}
+
+func TestParseMonthDayWithTimeCanUseToday(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	r, ok := Parse("March 16 at 7:30pm", Options{Reference: ref})
+	if !ok {
+		t.Fatalf("expected parse success")
+	}
+	if want := time.Date(2026, time.March, 16, 19, 30, 0, 0, time.UTC); !r.Time.Equal(want) {
+		t.Fatalf("time mismatch: got %v want %v", r.Time, want)
+	}
+}
+
+func FuzzParse(f *testing.F) {
+	for _, seed := range []string{
+		"now",
+		"yesterday at 10am",
+		"Restart the server in 5 days from now",
+		"February 29",
+		"every month on 31",
+		string(make([]byte, 300)),
+	} {
+		f.Add(seed)
+	}
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	f.Fuzz(func(t *testing.T, input string) {
+		_, _ = Parse(input, Options{Reference: ref, AllowEmbedded: true})
+	})
+}
+
 func BenchmarkParseNow(b *testing.B) {
 	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
 	opts := Options{Reference: ref}
