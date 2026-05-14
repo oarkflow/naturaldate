@@ -115,6 +115,58 @@ func TestParseRecurring(t *testing.T) {
 	}
 }
 
+func TestRecurrenceNext(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+
+	r, ok := Parse("every monday", Options{Reference: ref})
+	if !ok || !r.HasRecur {
+		t.Fatalf("expected recurring parse")
+	}
+	next, ok := r.Next(ref)
+	if !ok {
+		t.Fatalf("expected next occurrence")
+	}
+	if want := time.Date(2026, time.March, 23, 0, 0, 0, 0, time.UTC); !next.Equal(want) {
+		t.Fatalf("next occurrence mismatch: got %v want %v", next, want)
+	}
+
+	r, ok = Parse("every year on december 25 at noon", Options{Reference: ref})
+	if !ok || !r.HasRecur {
+		t.Fatalf("expected yearly recurring parse")
+	}
+	if r.Recur.OnMonth != int8(time.December) || r.Recur.OnDate != 25 {
+		t.Fatalf("unexpected recurrence anchor: %+v", r.Recur)
+	}
+	if want := time.Date(2026, time.December, 25, 12, 0, 0, 0, time.UTC); !r.Time.Equal(want) {
+		t.Fatalf("next occurrence mismatch: got %v want %v", r.Time, want)
+	}
+}
+
+func TestParseAllAndAppendAll(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	input := "Ship tomorrow, follow up in 2 weeks, then every monday at 9am."
+
+	results := ParseAll(input, Options{Reference: ref})
+	if len(results) != 3 {
+		t.Fatalf("result count mismatch: got %d want 3", len(results))
+	}
+	if want := time.Date(2026, time.March, 17, 0, 0, 0, 0, time.UTC); !results[0].Time.Equal(want) {
+		t.Fatalf("first time mismatch: got %v want %v", results[0].Time, want)
+	}
+	if want := ref.AddDate(0, 0, 14); !results[1].Time.Equal(want) {
+		t.Fatalf("second time mismatch: got %v want %v", results[1].Time, want)
+	}
+	if !results[2].HasRecur {
+		t.Fatalf("expected recurring third result")
+	}
+
+	dst := make([]Result, 0, 4)
+	dst = AppendAll(dst, input, Options{Reference: ref})
+	if len(dst) != len(results) {
+		t.Fatalf("append result count mismatch: got %d want %d", len(dst), len(results))
+	}
+}
+
 func TestParseInvalid(t *testing.T) {
 	if _, ok := Parse("not a date", Options{}); ok {
 		t.Fatalf("expected parse failure")

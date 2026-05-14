@@ -91,6 +91,29 @@ func Parse(s string, opts ...Options) (Result, bool) {
 	return p.parse(options.AllowEmbedded)
 }
 
+// ParseAll extracts every date/time expression found in s.
+// It always scans embedded text; use AppendAll to reuse caller-owned storage.
+func ParseAll(s string, opts ...Options) []Result {
+	return AppendAll(nil, s, opts...)
+}
+
+// AppendAll appends every date/time expression found in s to dst.
+// It is useful in hot paths where the caller wants to reuse result storage.
+func AppendAll(dst []Result, s string, opts ...Options) []Result {
+	var options Options
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	if options.Reference.IsZero() {
+		options.Reference = time.Now()
+	}
+	if options.WeekdayDir == 0 {
+		options.WeekdayDir = Past
+	}
+	p := parser{src: s, ref: options.Reference, wdir: options.WeekdayDir}
+	return p.parseAll(dst)
+}
+
 // MustParse is like Parse but panics on failure.
 func MustParse(s string, opts ...Options) Result {
 	var options Options
@@ -102,4 +125,24 @@ func MustParse(s string, opts ...Options) Result {
 		panic("naturaldate: cannot parse " + s)
 	}
 	return r
+}
+
+// Next returns the first occurrence of r after after.
+func (r Recurrence) Next(after time.Time) (time.Time, bool) {
+	if r.Interval < 1 {
+		return time.Time{}, false
+	}
+	next := nextOccurrenceFrom(after, &r)
+	if !next.After(after) {
+		return time.Time{}, false
+	}
+	return next, true
+}
+
+// Next returns the next occurrence for recurring results.
+func (r Result) Next(after time.Time) (time.Time, bool) {
+	if !r.HasRecur {
+		return time.Time{}, false
+	}
+	return r.Recur.Next(after)
 }

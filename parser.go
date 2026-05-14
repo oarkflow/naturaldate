@@ -27,6 +27,25 @@ func (p *parser) parse(embedded bool) (Result, bool) {
 	return Result{}, false
 }
 
+func (p *parser) parseAll(dst []Result) []Result {
+	p.lex.init(p.src)
+	for start := 0; start < p.lex.n; {
+		p.lex.reset(start)
+		r, ok := p.parseExpr(false)
+		if !ok {
+			start++
+			continue
+		}
+		dst = append(dst, r)
+		if p.lex.pos > start {
+			start = p.lex.pos
+		} else {
+			start++
+		}
+	}
+	return dst
+}
+
 func (p *parser) parseExpr(embedded bool) (Result, bool) {
 	mark := p.lex.mark()
 
@@ -234,6 +253,8 @@ func (p *parser) parseRelative(embedded bool) (Result, bool) {
 	mark := p.lex.mark()
 	if embedded {
 		p.skipToQuantity()
+	} else if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "in") {
+		p.lex.next()
 	}
 	if p.lex.remaining() == 0 {
 		p.lex.reset(mark)
@@ -490,6 +511,15 @@ func (p *parser) parseRecurring() (Result, bool) {
 		if wd, ok := p.peekWeekday(); ok {
 			p.lex.next()
 			recur.OnDay = weekdayToISO(wd)
+		} else if mon, ok := p.peekMonth(); ok {
+			p.lex.next()
+			recur.OnMonth = int8(mon)
+			if day, ok := p.parseOrdinalOrNumber(); ok {
+				if !validMonthDayInRange(p.ref.Year(), p.ref.Year()+8, mon, day) {
+					return Result{}, false
+				}
+				recur.OnDate = int8(day)
+			}
 		} else if day, ok := p.parseOrdinalOrNumber(); ok {
 			if day < 1 || day > 31 {
 				return Result{}, false
@@ -709,6 +739,14 @@ func (p *parser) peekWeekday() (time.Weekday, bool) {
 	return wordToWeekday(p.lex.val(t))
 }
 
+func (p *parser) peekMonth() (time.Month, bool) {
+	t := p.lex.peek()
+	if t.kind != tokWord {
+		return 0, false
+	}
+	return wordToMonth(p.lex.val(t))
+}
+
 func (p *parser) skipWords(words ...string) {
 	for _, w := range words {
 		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), w) {
@@ -751,6 +789,15 @@ func validMonthDay(year int, month time.Month, day int) bool {
 	}
 	t := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 	return t.Year() == year && t.Month() == month && t.Day() == day
+}
+
+func validMonthDayInRange(startYear, endYear int, month time.Month, day int) bool {
+	for y := startYear; y <= endYear; y++ {
+		if validMonthDay(y, month, day) {
+			return true
+		}
+	}
+	return false
 }
 
 func nextMonthDay(ref time.Time, month time.Month, day int, clk clockResult, hasClock bool) (time.Time, bool) {
@@ -800,6 +847,9 @@ func isoToWeekday(d int8) time.Weekday {
 }
 
 func nextOccurrenceFrom(ref time.Time, r *Recurrence) time.Time {
+	if r.Interval < 1 {
+		return ref
+	}
 	switch r.Every {
 	case UnitSecond:
 		return ref.Add(time.Duration(r.Interval) * time.Second)
@@ -808,31 +858,89 @@ func nextOccurrenceFrom(ref time.Time, r *Recurrence) time.Time {
 	case UnitHour:
 		return ref.Add(time.Duration(r.Interval) * time.Hour)
 	case UnitDay:
-		t := startOfDay(ref).AddDate(0, 0, r.Interval)
-		return applyClock(t, r.At, r.HasAt)
+		t := applyClock(startOfDay(ref), r.At, r.HasAt)
+		if t.After(ref) {
+			return t
+		}
+		return applyClock(startOfDay(ref).AddDate(0, 0, r.Interval), r.At, r.HasAt)
 	case UnitWeek:
-		t := startOfDay(ref).AddDate(0, 0, r.Interval*7)
+		if r.OnDay != 0 {
+			return nextWeeklyOccurrence(ref, r)
+		}
+		t := applyClock(startOfDay(ref), r.At, r.HasAt)
+		if t.After(ref) {
+			return t
+		}
+		return applyClock(startOfDay(ref).AddDate(0, 0, r.Interval*7), r.At, r.HasAt)
+	case UnitMonth:
+		if r.OnDate != 0 {
+			return nextMonthlyDateOccurrence(ref, r)
+		}
+		t := startOfMonth(ref).AddDate(0, r.Interval, 0)
 		if r.OnDay != 0 {
 			t = nearestWeekday(t, isoToWeekday(r.OnDay), Future)
 		}
 		return applyClock(t, r.At, r.HasAt)
-	case UnitMonth:
-		t := startOfMonth(ref).AddDate(0, r.Interval, 0)
-		if r.OnDate != 0 {
-			for i := 0; i < 120 && !validMonthDay(t.Year(), t.Month(), int(r.OnDate)); i++ {
-				t = t.AddDate(0, r.Interval, 0)
-			}
-			if !validMonthDay(t.Year(), t.Month(), int(r.OnDate)) {
-				return ref
-			}
-			t = time.Date(t.Year(), t.Month(), int(r.OnDate), 0, 0, 0, 0, ref.Location())
-		} else if r.OnDay != 0 {
-			t = nearestWeekday(t, isoToWeekday(r.OnDay), Future)
-		}
-		return applyClock(t, r.At, r.HasAt)
 	case UnitYear:
-		t := startOfYear(ref).AddDate(r.Interval, 0, 0)
-		return applyClock(t, r.At, r.HasAt)
+		if r.OnMonth != 0 || r.OnDate != 0 {
+			return nextYearlyOccurrence(ref, r)
+		}
+		t := applyClock(startOfYear(ref), r.At, r.HasAt)
+		if t.After(ref) {
+			return t
+		}
+		return applyClock(startOfYear(ref).AddDate(r.Interval, 0, 0), r.At, r.HasAt)
+	}
+	return ref
+}
+
+func nextWeeklyOccurrence(ref time.Time, r *Recurrence) time.Time {
+	wd := isoToWeekday(r.OnDay)
+	base := startOfDay(ref)
+	diff := int(wd) - int(base.Weekday())
+	if diff < 0 {
+		diff += 7
+	}
+	t := applyClock(base.AddDate(0, 0, diff), r.At, r.HasAt)
+	if t.After(ref) {
+		return t
+	}
+	return applyClock(base.AddDate(0, 0, diff+r.Interval*7), r.At, r.HasAt)
+}
+
+func nextMonthlyDateOccurrence(ref time.Time, r *Recurrence) time.Time {
+	for monthOffset := 0; monthOffset <= r.Interval*120; monthOffset += r.Interval {
+		t := startOfMonth(ref).AddDate(0, monthOffset, 0)
+		if !validMonthDay(t.Year(), t.Month(), int(r.OnDate)) {
+			continue
+		}
+		t = time.Date(t.Year(), t.Month(), int(r.OnDate), 0, 0, 0, 0, ref.Location())
+		t = applyClock(t, r.At, r.HasAt)
+		if t.After(ref) {
+			return t
+		}
+	}
+	return ref
+}
+
+func nextYearlyOccurrence(ref time.Time, r *Recurrence) time.Time {
+	month := time.Month(r.OnMonth)
+	if month == 0 {
+		month = time.January
+	}
+	day := int(r.OnDate)
+	if day == 0 {
+		day = 1
+	}
+	for y := ref.Year(); y <= ref.Year()+r.Interval*32; y += r.Interval {
+		if !validMonthDay(y, month, day) {
+			continue
+		}
+		t := time.Date(y, month, day, 0, 0, 0, 0, ref.Location())
+		t = applyClock(t, r.At, r.HasAt)
+		if t.After(ref) {
+			return t
+		}
 	}
 	return ref
 }
