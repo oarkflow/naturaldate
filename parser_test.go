@@ -296,3 +296,16 @@ func BenchmarkParseRecurring(b *testing.B) {
 		_, _ = Parse("once a month on friday midnight", opts)
 	}
 }
+
+func BenchmarkAppendAll(b *testing.B) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	opts := Options{Reference: ref}
+	input := "Ship tomorrow, follow up in 2 weeks, then every monday at 9am."
+	dst := make([]Result, 0, 4)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dst = dst[:0]
+		dst = AppendAll(dst, input, opts)
+	}
+}

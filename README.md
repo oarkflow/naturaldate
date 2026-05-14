@@ -173,6 +173,33 @@ Like Parse but panics on failure. Use when you're confident the input is valid.
 result := naturaldate.MustParse("next monday at 9am")
 ```
 
+### ParseAll
+
+```go
+func ParseAll(s string, opts ...Options) []Result
+func AppendAll(dst []Result, s string, opts ...Options) []Result
+```
+
+Extracts every date expression from longer text. `AppendAll` lets callers reuse storage.
+
+```go
+results := naturaldate.ParseAll("ship tomorrow, follow up in 2 weeks", opts)
+```
+
+### Recurrence.Next
+
+```go
+func (r Recurrence) Next(after time.Time) (time.Time, bool)
+func (r Result) Next(after time.Time) (time.Time, bool)
+```
+
+Returns the next occurrence for recurring results.
+
+```go
+result, _ := naturaldate.Parse("every monday at 9am", opts)
+next, ok := result.Next(time.Now())
+```
+
 ### Options
 
 ```go
