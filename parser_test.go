@@ -612,3 +612,125 @@ func TestParseEnhancedRecurring(t *testing.T) {
 		}
 	}
 }
+
+func TestParseEssentialFeatureAdditions(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC) // Monday
+
+	cases := []struct {
+		name  string
+		input string
+		opts  Options
+		want  time.Time
+		unit  Unit
+	}{
+		{"next business day", "next business day", Options{Reference: ref}, time.Date(2026, time.March, 17, 15, 4, 5, 0, time.UTC), UnitDay},
+		{"custom weekend", "next business day", Options{Reference: ref, WeekendDays: []time.Weekday{time.Tuesday}}, time.Date(2026, time.March, 18, 15, 4, 5, 0, time.UTC), UnitDay},
+		{"next quarter", "next quarter", Options{Reference: ref}, time.Date(2026, time.April, 1, 0, 0, 0, 0, time.UTC), UnitQuarter},
+		{"quarter literal", "Q1 2027", Options{Reference: ref}, time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC), UnitQuarter},
+		{"end of next month", "end of next month", Options{Reference: ref}, time.Date(2026, time.April, 30, 23, 59, 59, 999999999, time.UTC), UnitMonth},
+		{"casual prefix", "please around tomorrow", Options{Reference: ref, Mode: ModeCasual}, time.Date(2026, time.March, 17, 0, 0, 0, 0, time.UTC), UnitDay},
+		{"date order dmy", "03/04", Options{Reference: ref, DateOrder: DateOrderDMY}, time.Date(2026, time.April, 3, 0, 0, 0, 0, time.UTC), UnitDay},
+		{"date order ymd", "26/04/03", Options{Reference: ref, DateOrder: DateOrderYMD}, time.Date(2026, time.April, 3, 0, 0, 0, 0, time.UTC), UnitDay},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := Parse(tc.input, tc.opts)
+			if !ok {
+				t.Fatalf("expected parse success")
+			}
+			if !r.Time.Equal(tc.want) {
+				t.Fatalf("time mismatch: got %v want %v", r.Time, tc.want)
+			}
+			if r.Truncated != tc.unit {
+				t.Fatalf("unit mismatch: got %v want %v", r.Truncated, tc.unit)
+			}
+		})
+	}
+}
+
+func TestParseWithErrorAndMatchMetadata(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	r, err := ParseWithError("Ship tomorrow, then wait", Options{Reference: ref, AllowEmbedded: true})
+	if err != nil {
+		t.Fatalf("expected parse success: %v", err)
+	}
+	if r.Start != 5 || r.End != 13 || r.Text != "tomorrow" || r.Match() != "tomorrow" {
+		t.Fatalf("unexpected match metadata: start=%d end=%d text=%q", r.Start, r.End, r.Text)
+	}
+
+	_, err = ParseWithError("now later", Options{Reference: ref})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	perr, ok := err.(*ParseError)
+	if !ok || perr.Kind != ErrTrailingInput {
+		t.Fatalf("expected trailing input error, got %T %v", err, err)
+	}
+}
+
+func TestParseRange(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+
+	cases := []struct {
+		input string
+		wantS time.Time
+		wantE time.Time
+		unit  Unit
+	}{
+		{"this month", time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, time.April, 1, 0, 0, 0, 0, time.UTC), UnitMonth},
+		{"next quarter", time.Date(2026, time.April, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC), UnitQuarter},
+		{"last 7 days", ref.AddDate(0, 0, -7), ref, UnitDay},
+		{"from monday to friday", time.Date(2026, time.March, 9, 0, 0, 0, 0, time.UTC), time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC), UnitDay},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			r, ok := ParseRange(tc.input, Options{Reference: ref})
+			if !ok {
+				t.Fatalf("expected range parse success")
+			}
+			if !r.Start.Equal(tc.wantS) || !r.End.Equal(tc.wantE) {
+				t.Fatalf("range mismatch: got %v..%v want %v..%v", r.Start, r.End, tc.wantS, tc.wantE)
+			}
+			if r.Truncated != tc.unit {
+				t.Fatalf("unit mismatch: got %v want %v", r.Truncated, tc.unit)
+			}
+		})
+	}
+}
+
+func TestParseDurationAdditions(t *testing.T) {
+	d, ok := ParseDuration("2h 30m")
+	if !ok || d != 150*time.Minute {
+		t.Fatalf("duration mismatch: got %v ok=%v", d, ok)
+	}
+
+	cd, ok := ParseCalendarDuration("one week and three days")
+	if !ok || cd.Weeks != 1 || cd.Days != 3 {
+		t.Fatalf("calendar duration mismatch: %+v ok=%v", cd, ok)
+	}
+
+	if _, ok := ParseDuration("1 month"); ok {
+		t.Fatalf("time.Duration parser should reject calendar months")
+	}
+}
+
+func TestParseNewRecurringForms(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+
+	r, ok := Parse("every weekday at 9am", Options{Reference: ref})
+	if !ok || !r.HasRecur || !r.Time.Equal(time.Date(2026, time.March, 17, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("unexpected weekday recurrence: %+v ok=%v", r, ok)
+	}
+
+	r, ok = Parse("every monday and wednesday at 9am", Options{Reference: ref})
+	if !ok || !r.HasRecur || !r.Time.Equal(time.Date(2026, time.March, 18, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("unexpected multi-weekday recurrence: %+v ok=%v", r, ok)
+	}
+
+	r, ok = Parse("every 15th of the month", Options{Reference: ref})
+	if !ok || !r.HasRecur || !r.Time.Equal(time.Date(2026, time.April, 15, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("unexpected monthly date recurrence: %+v ok=%v", r, ok)
+	}
+}

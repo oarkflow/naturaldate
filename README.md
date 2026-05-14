@@ -21,6 +21,8 @@ A high-performance, zero-allocation Go library for parsing natural language date
 - **Flexible parsing** - Supports a wide variety of natural language date formats
 - **Recurring schedules** - Parse "every week", "once a month", etc.
 - **Embedded dates** - Extract dates from within larger text strings
+- **Date ranges and durations** - Parse reporting windows and mixed calendar durations
+- **Detailed errors and match spans** - Opt into structured failures and source offsets
 
 ## Installation
 
@@ -81,6 +83,7 @@ func main() {
 | `one year from now` | 1 year after reference |
 | `in 2 weeks` | 2 weeks after reference |
 | `in 5 business days` | 5 weekdays after reference, skipping configured holidays |
+| `next business day` | Next configured working day |
 
 ### Weekday References
 
@@ -99,6 +102,7 @@ func main() {
 |-------|-------------|
 | `last month` | First day of previous month |
 | `next month` | First day of next month |
+| `next quarter` | First day of next quarter |
 | `last january` | January of previous year (if past) |
 | `next december` | December of next year |
 | `last february` | February of current or previous year |
@@ -128,6 +132,7 @@ func main() {
 | Input | Description |
 |-------|-------------|
 | `2026-12-25` | Full ISO date |
+| `Q1 2026` | First day of quarter 1 in 2026 |
 | `12/25` | Month/Day (US format) |
 | `25-12` | Day/Month (EU format) |
 | `12.25` | Day.Month alternative |
@@ -142,7 +147,10 @@ func main() {
 | `every month` | Monthly |
 | `once a week` | Weekly |
 | `every monday` | Every Monday |
+| `every weekday at 9am` | Every weekday at 09:00 |
+| `every monday and wednesday at 9am` | Every Monday and Wednesday at 09:00 |
 | `every 2 weeks on friday` | Bi-weekly on Fridays |
+| `every 15th of the month` | Monthly on the 15th |
 | `once a month on friday midnight` | Monthly on Friday at midnight |
 | `every first monday of the month` | First Monday of each month |
 | `every last friday of the month` | Last Friday of each month |
@@ -170,6 +178,8 @@ func main() {
 - **Two-digit years**: numeric years below 100 are interpreted as 2000-based years, e.g. `03/16/26` means 2026.
 - **Relative suffixes**: `ago` means past. `from` is accepted only as `from now` or `from today`; incomplete forms like `5 days from` are rejected.
 - **Business days**: business-day expressions skip Saturdays, Sundays, and any dates in `Options.Holidays`.
+- **Custom weekends**: set `Options.WeekendDays` when your working week differs from Monday-Friday.
+- **Date order**: set `Options.DateOrder` to force MDY, DMY, or YMD parsing for ambiguous numeric dates.
 - **Recurrences**: recurring parses return the first occurrence strictly after the reference time. `Result.Next(after)` also returns the first occurrence strictly after `after`.
 - **Invalid values**: invalid calendar dates, invalid clock values, zero recurrence intervals, and unsupported trailing words are rejected.
 
@@ -202,6 +212,14 @@ Like Parse but panics on failure. Use when you're confident the input is valid.
 result := naturaldate.MustParse("next monday at 9am")
 ```
 
+### ParseWithError
+
+```go
+func ParseWithError(s string, opts ...Options) (Result, error)
+```
+
+Returns a structured `*ParseError` with a failure kind such as empty input, invalid expression, or trailing input.
+
 ### ParseAll
 
 ```go
@@ -214,6 +232,30 @@ Extracts every date expression from longer text. `AppendAll` lets callers reuse 
 ```go
 results := naturaldate.ParseAll("ship tomorrow, follow up in 2 weeks", opts)
 ```
+
+Each `Result` includes `Start`, `End`, and `Text` metadata for the matched source span.
+
+### ParseRange
+
+```go
+func ParseRange(s string, opts ...Options) (DateRange, bool)
+```
+
+Parses reporting/scheduling ranges. `DateRange.Start` is inclusive and `DateRange.End` is exclusive.
+
+```go
+window, ok := naturaldate.ParseRange("last 7 days", opts)
+quarter, ok := naturaldate.ParseRange("Q1 2026", opts)
+```
+
+### ParseDuration
+
+```go
+func ParseDuration(s string) (time.Duration, bool)
+func ParseCalendarDuration(s string) (CalendarDuration, bool)
+```
+
+`ParseDuration` handles exact clock-safe durations such as `2h 30m`. `ParseCalendarDuration` also supports calendar units such as months and years.
 
 ### Recurrence.Next
 
@@ -251,6 +293,15 @@ type Options struct {
 
     // Holidays contains dates to skip for business-day expressions.
     Holidays []time.Time
+
+    // WeekendDays configures non-working weekdays for business-day expressions.
+    WeekendDays []time.Weekday
+
+    // DateOrder controls ambiguous numeric dates.
+    DateOrder DateOrder
+
+    // Mode controls tolerance for filler words.
+    Mode ParseMode
 }
 ```
 
@@ -263,6 +314,9 @@ type Result struct {
     HasRecur  bool         // Whether this is a recurring schedule
     Direction Direction    // Past, Present, or Future
     Truncated Unit         // Finest unit mentioned (e.g., Hour for "10am")
+    Start     int          // Byte offset of the matched expression
+    End       int          // Byte offset immediately after the match
+    Text      string       // Matched source text
 }
 ```
 
@@ -288,6 +342,7 @@ const (
     UnitWeek            // "next week"
     UnitMonth           // "last month"
     UnitYear            // "next year"
+    UnitQuarter         // "next quarter", "Q1 2026"
 )
 ```
 

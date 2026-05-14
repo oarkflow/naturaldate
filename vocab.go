@@ -125,7 +125,7 @@ func wordToUnit(s string) (Unit, bool) {
 	switch {
 	case eqLower(s, "second") || eqLower(s, "seconds") || eqLower(s, "sec") || eqLower(s, "secs") || eqLower(s, "s"):
 		return UnitSecond, true
-	case eqLower(s, "minute") || eqLower(s, "minutes") || eqLower(s, "min") || eqLower(s, "mins"):
+	case eqLower(s, "minute") || eqLower(s, "minutes") || eqLower(s, "min") || eqLower(s, "mins") || eqLower(s, "m"):
 		return UnitMinute, true
 	case eqLower(s, "hour") || eqLower(s, "hours") || eqLower(s, "hr") || eqLower(s, "hrs") || eqLower(s, "h"):
 		return UnitHour, true
@@ -135,6 +135,8 @@ func wordToUnit(s string) (Unit, bool) {
 		return UnitWeek, true
 	case eqLower(s, "month") || eqLower(s, "months") || eqLower(s, "mo") || eqLower(s, "mos"):
 		return UnitMonth, true
+	case eqLower(s, "quarter") || eqLower(s, "quarters") || eqLower(s, "qtr") || eqLower(s, "qtrs"):
+		return UnitQuarter, true
 	case eqLower(s, "year") || eqLower(s, "years") || eqLower(s, "yr") || eqLower(s, "yrs") || eqLower(s, "y"):
 		return UnitYear, true
 	}
