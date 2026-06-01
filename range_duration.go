@@ -39,12 +39,27 @@ func ParseRange(s string, opts ...Options) (DateRange, bool) {
 	return DateRange{}, false
 }
 
+// ParseRangeWithError is like ParseRange but returns a structured error on failure.
+func ParseRangeWithError(s string, opts ...Options) (DateRange, error) {
+	r, ok := ParseRange(s, opts...)
+	if ok {
+		return r, nil
+	}
+	if trimSpaceASCII(s) == "" {
+		return DateRange{}, &ParseError{Input: s, Kind: ErrEmptyInput}
+	}
+	return DateRange{}, &ParseError{Input: s, Kind: ErrInvalidExpression}
+}
+
 func parseExplicitRange(src, lower string, options Options) (Result, Result, bool) {
 	body := ""
 	sep := ""
 	if strings.HasPrefix(lower, "from ") {
 		body = strings.TrimSpace(src[5:])
 		sep = " to "
+		if idx := strings.Index(strings.ToLower(body), " until "); idx >= 0 {
+			sep = " until "
+		}
 	} else if strings.HasPrefix(lower, "between ") {
 		body = strings.TrimSpace(src[8:])
 		sep = " and "
@@ -77,6 +92,36 @@ func parseExplicitRange(src, lower string, options Options) (Result, Result, boo
 
 func parseRelativeRange(src, lower string, options Options) (DateRange, bool) {
 	parts := strings.Fields(lower)
+	if len(parts) >= 3 && parts[0] == "week" && parts[1] == "of" {
+		if mon, ok := wordToMonth(parts[2]); ok && len(parts) >= 4 {
+			day := atoi(parts[3])
+			if day > 0 && validMonthDay(options.Reference.Year(), mon, day) {
+				point := time.Date(options.Reference.Year(), mon, day, 0, 0, 0, 0, options.Reference.Location())
+				start := startOfWeek(point)
+				return DateRange{Start: start, End: start.AddDate(0, 0, 7), Truncated: UnitWeek, Direction: directionFromCompare(start, options.Reference)}, true
+			}
+		}
+		if point, ok := Parse(strings.TrimSpace(src[len("week of "):]), options); ok {
+			start := startOfWeek(point.Time)
+			return DateRange{Start: start, End: start.AddDate(0, 0, 7), Truncated: UnitWeek, Direction: directionFromCompare(start, options.Reference)}, true
+		}
+	}
+	if len(parts) == 3 && parts[1] == "to" && parts[2] == "date" {
+		unit, ok := toDateUnit(parts[0])
+		if !ok {
+			return DateRange{}, false
+		}
+		start := periodStart(options.Reference, unit)
+		return DateRange{Start: start, End: options.Reference, Truncated: unit, Direction: Present}, true
+	}
+	if len(parts) == 4 && (parts[0] == "last" || parts[0] == "previous") && parts[2] == "to" && parts[3] == "date" {
+		unit, ok := wordToUnit(parts[1])
+		if !ok || unit == UnitSecond || unit == UnitMinute || unit == UnitHour {
+			return DateRange{}, false
+		}
+		start := periodStart(shiftByUnit(options.Reference, unit, Past), unit)
+		return DateRange{Start: start, End: options.Reference, Truncated: unit, Direction: Past}, true
+	}
 	if len(parts) == 2 {
 		dir, ok := rangeDirection(parts[0])
 		if !ok {
@@ -88,7 +133,7 @@ func parseRelativeRange(src, lower string, options Options) (DateRange, bool) {
 		}
 		return periodRange(options.Reference, unit, dir), true
 	}
-	if len(parts) == 3 && (parts[0] == "last" || parts[0] == "past") {
+	if len(parts) == 3 && (parts[0] == "last" || parts[0] == "past" || parts[0] == "previous") {
 		n, ok := wordToInt(parts[1])
 		if !ok {
 			n = atoi(parts[1])
@@ -102,6 +147,20 @@ func parseRelativeRange(src, lower string, options Options) (DateRange, bool) {
 	}
 	_ = src
 	return DateRange{}, false
+}
+
+func toDateUnit(s string) (Unit, bool) {
+	switch s {
+	case "week", "wtd":
+		return UnitWeek, true
+	case "month", "mtd":
+		return UnitMonth, true
+	case "quarter", "qtd":
+		return UnitQuarter, true
+	case "year", "ytd":
+		return UnitYear, true
+	}
+	return UnitNone, false
 }
 
 func rangeDirection(s string) (Direction, bool) {

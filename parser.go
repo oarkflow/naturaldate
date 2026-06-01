@@ -10,6 +10,8 @@ type parser struct {
 	wdir      Direction
 	holidays  []time.Time
 	weekends  []time.Weekday
+	bizEnd    Clock
+	fiscal    time.Month
 	dateOrder DateOrder
 	mode      ParseMode
 	lex       lexer
@@ -22,6 +24,8 @@ func newParser(s string, options Options) parser {
 		wdir:      options.WeekdayDir,
 		holidays:  options.Holidays,
 		weekends:  options.WeekendDays,
+		bizEnd:    options.BusinessDayEnd,
+		fiscal:    options.FiscalYearStartMonth,
 		dateOrder: options.DateOrder,
 		mode:      options.Mode,
 	}
@@ -84,6 +88,11 @@ func (p *parser) parseExpr(embedded bool) (Result, bool) {
 	}
 	p.lex.reset(mark)
 
+	if r, ok := p.parseSpecialRelative(); ok {
+		return r, true
+	}
+	p.lex.reset(mark)
+
 	if r, ok := p.parseAnchor(); ok {
 		return r, true
 	}
@@ -110,6 +119,11 @@ func (p *parser) parseExpr(embedded bool) (Result, bool) {
 	p.lex.reset(mark)
 
 	if r, ok := p.parseMonthDay(); ok {
+		return r, true
+	}
+	p.lex.reset(mark)
+
+	if r, ok := p.parseBareMonth(); ok {
 		return r, true
 	}
 	p.lex.reset(mark)
@@ -157,6 +171,29 @@ func (p *parser) parseAnchor() (Result, bool) {
 		p.lex.next()
 		base = startOfDay(p.ref).AddDate(0, 0, 1)
 		dir = Future
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "morning") {
+			p.lex.next()
+			base = setClock(base, clockResult{9, 0, 0, UnitHour})
+			unit = UnitHour
+		} else if clk, ok := p.parsePartOfDayClock(); ok {
+			base = setClock(base, clk)
+			unit = clk.unit
+		}
+	case p.lex.wordEq(t, "tonight"):
+		p.lex.next()
+		base = setClock(startOfDay(p.ref), clockResult{20, 0, 0, UnitHour})
+		if !base.After(p.ref) {
+			base = base.AddDate(0, 0, 1)
+		}
+		unit = UnitHour
+		dir = Future
+	case p.lex.wordEq(t, "eod") || p.lex.wordEq(t, "cob"):
+		p.lex.next()
+		t := applyClock(startOfDay(p.ref), p.bizEnd, true)
+		if !t.After(p.ref) {
+			t = t.AddDate(0, 0, 1)
+		}
+		return Result{Time: t, Truncated: UnitHour, Direction: Future}, true
 	case p.lex.wordEq(t, "midnight"):
 		p.lex.next()
 		t := startOfDay(p.ref)
@@ -179,6 +216,18 @@ func (p *parser) parseAnchor() (Result, bool) {
 		return Result{}, false
 	case p.lex.wordEq(t, "end"):
 		p.lex.next()
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "of") && p.lex.peekAt(1).kind == tokWord && p.lex.wordEq(p.lex.peekAt(1), "business") {
+			p.lex.next()
+			p.lex.next()
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "day") {
+				p.lex.next()
+			}
+			t := applyClock(startOfDay(p.ref), p.bizEnd, true)
+			if !t.After(p.ref) {
+				t = applyClock(startOfDay(addBusinessDays(p.ref, 1, p.holidays, p.weekends)), p.bizEnd, true)
+			}
+			return Result{Time: t, Truncated: UnitHour, Direction: Future}, true
+		}
 		if result, ok := p.parseEndOf(); ok {
 			return result, true
 		}
@@ -187,6 +236,12 @@ func (p *parser) parseAnchor() (Result, bool) {
 		return Result{}, false
 	}
 	if clk, ok := p.parseAtTime(); ok {
+		base = setClock(base, clk)
+		unit = clk.unit
+		if dir == Present {
+			dir = directionFromCompare(base, p.ref)
+		}
+	} else if clk, ok := p.parsePartOfDayClock(); ok {
 		base = setClock(base, clk)
 		unit = clk.unit
 		if dir == Present {
@@ -309,11 +364,52 @@ func (p *parser) parseLastNext() (Result, bool) {
 	}
 	p.lex.next()
 
+	if n, ok := p.parseNumber(); ok {
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "weekdays") {
+			p.lex.next()
+			mul := 1
+			if dir == Past {
+				mul = -1
+			}
+			return Result{Time: addWeekdays(p.ref, mul*n), Truncated: UnitDay, Direction: dir}, true
+		}
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "business") {
+			p.lex.next()
+			if unit, ok := p.peekUnit(); ok && unit == UnitWeek {
+				p.lex.next()
+				mul := 1
+				if dir == Past {
+					mul = -1
+				}
+				return Result{Time: addBusinessWeeks(p.ref, mul*n, p.holidays, p.weekends), Truncated: UnitWeek, Direction: dir}, true
+			}
+		}
+		return Result{}, false
+	}
+
 	t2 := p.lex.peek()
 	if t2.kind != tokWord {
 		return Result{}, false
 	}
 	v2 := p.lex.val(t2)
+
+	if p.lex.wordEq(t2, "fiscal") {
+		p.lex.next()
+		if p.lex.peek().kind != tokWord {
+			return Result{}, false
+		}
+		if p.lex.wordEq(p.lex.peek(), "quarter") {
+			p.lex.next()
+			base := fiscalPeriodStart(p.ref, UnitQuarter, dir, p.fiscal)
+			return Result{Time: base, Truncated: UnitQuarter, Direction: dir}, true
+		}
+		if p.lex.wordEq(p.lex.peek(), "year") {
+			p.lex.next()
+			base := fiscalPeriodStart(p.ref, UnitYear, dir, p.fiscal)
+			return Result{Time: base, Truncated: UnitYear, Direction: dir}, true
+		}
+		return Result{}, false
+	}
 
 	if isBusinessDays(v2) {
 		p.lex.next()
@@ -328,10 +424,18 @@ func (p *parser) parseLastNext() (Result, bool) {
 		return Result{Time: base, Truncated: UnitDay, Direction: dir}, true
 	}
 
+	if p.lex.wordEq(t2, "weekend") {
+		p.lex.next()
+		base := weekendStart(p.ref, dir)
+		return Result{Time: base, Truncated: UnitDay, Direction: dir}, true
+	}
+
 	if wd, ok := wordToWeekday(v2); ok {
 		p.lex.next()
 		base := startOfDay(nearestWeekday(p.ref, wd, dir))
 		if clk, ok := p.parseAtTime(); ok {
+			base = setClock(base, clk)
+		} else if clk, ok := p.parsePartOfDayClock(); ok {
 			base = setClock(base, clk)
 		}
 		return Result{Time: base, Truncated: UnitDay, Direction: dir}, true
@@ -408,6 +512,15 @@ func (p *parser) parseBareWeekday() (Result, bool) {
 		}
 		return Result{Time: candidate, Truncated: clk.unit, Direction: dir}, true
 	}
+	if clk, ok := p.parsePartOfDayClock(); ok {
+		candidate := setClock(base, clk)
+		if candidate.Before(p.ref) && dir == Past {
+			base = startOfDay(nearestWeekday(p.ref, wd, Future))
+			candidate = setClock(base, clk)
+			dir = Future
+		}
+		return Result{Time: candidate, Truncated: clk.unit, Direction: dir}, true
+	}
 	return Result{Time: base, Truncated: UnitDay, Direction: dir}, true
 }
 
@@ -431,6 +544,25 @@ func (p *parser) parseRelative(embedded bool) (Result, bool) {
 
 func (p *parser) parseRelativeHere() (Result, bool) {
 	mark := p.lex.mark()
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "half") {
+		p.lex.next()
+		if p.lex.peek().kind == tokWord && (p.lex.wordEq(p.lex.peek(), "an") || p.lex.wordEq(p.lex.peek(), "a")) {
+			p.lex.next()
+		}
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "hour") {
+			p.lex.next()
+			return Result{Time: p.ref.Add(30 * time.Minute), Truncated: UnitMinute, Direction: Future}, true
+		}
+		p.lex.reset(mark)
+	}
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "quarter") {
+		p.lex.next()
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "hour") {
+			p.lex.next()
+			return Result{Time: p.ref.Add(15 * time.Minute), Truncated: UnitMinute, Direction: Future}, true
+		}
+		p.lex.reset(mark)
+	}
 	if n, ok := p.parseNumber(); ok {
 		if p.lex.peek().kind == tokWord && isBusinessDays(p.lex.val(p.lex.peek())) {
 			p.lex.next()
@@ -447,6 +579,19 @@ func (p *parser) parseRelativeHere() (Result, bool) {
 				mul = -1
 			}
 			return Result{Time: addBusinessDays(p.ref, mul*n, p.holidays, p.weekends), Truncated: UnitDay, Direction: dir}, true
+		}
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "weekdays") {
+			p.lex.next()
+			dir := Future
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "ago") {
+				dir = Past
+				p.lex.next()
+			}
+			mul := 1
+			if dir == Past {
+				mul = -1
+			}
+			return Result{Time: addWeekdays(p.ref, mul*n), Truncated: UnitDay, Direction: dir}, true
 		}
 	}
 	p.lex.reset(mark)
@@ -478,6 +623,101 @@ func (p *parser) parseRelativeHere() (Result, bool) {
 		mul = -1
 	}
 	return Result{Time: shiftByUnitN(p.ref, unit, mul*n), Truncated: unit, Direction: dir}, true
+}
+
+func (p *parser) parseSpecialRelative() (Result, bool) {
+	mark := p.lex.mark()
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "the") {
+		p.lex.next()
+	}
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "day") {
+		p.lex.next()
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "after") {
+			p.lex.next()
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "tomorrow") {
+				p.lex.next()
+				return Result{Time: startOfDay(p.ref).AddDate(0, 0, 2), Truncated: UnitDay, Direction: Future}, true
+			}
+		} else if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "before") {
+			p.lex.next()
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "yesterday") {
+				p.lex.next()
+				return Result{Time: startOfDay(p.ref).AddDate(0, 0, -2), Truncated: UnitDay, Direction: Past}, true
+			}
+		}
+	}
+	p.lex.reset(mark)
+
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "quarter") {
+		p.lex.next()
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "past") {
+			p.lex.next()
+			if clk, ok := p.parseClockExpr(); ok {
+				clk.min = 15
+				clk.unit = UnitMinute
+				base := setClock(startOfDay(p.ref), clk)
+				if !base.After(p.ref) {
+					base = base.AddDate(0, 0, 1)
+				}
+				return Result{Time: base, Truncated: UnitMinute, Direction: Future}, true
+			}
+		}
+	}
+	p.lex.reset(mark)
+
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "half") {
+		p.lex.next()
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "past") {
+			p.lex.next()
+			if clk, ok := p.parseClockExpr(); ok {
+				clk.min = 30
+				clk.unit = UnitMinute
+				base := setClock(startOfDay(p.ref), clk)
+				if !base.After(p.ref) {
+					base = base.AddDate(0, 0, 1)
+				}
+				return Result{Time: base, Truncated: UnitMinute, Direction: Future}, true
+			}
+		}
+	}
+	p.lex.reset(mark)
+
+	if n, ok := p.parseNumber(); ok {
+		if wd, ok := p.peekWeekday(); ok {
+			p.lex.next()
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "from") {
+				p.lex.next()
+				if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "now") {
+					p.lex.next()
+				}
+				return Result{Time: nthWeekdayFrom(p.ref, wd, n, Future), Truncated: UnitDay, Direction: Future}, true
+			}
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "ago") {
+				p.lex.next()
+				return Result{Time: nthWeekdayFrom(p.ref, wd, n, Past), Truncated: UnitDay, Direction: Past}, true
+			}
+		}
+	}
+	p.lex.reset(mark)
+
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "this") {
+		p.lex.next()
+		if clk, ok := p.parsePartOfDayClock(); ok {
+			base := setClock(startOfDay(p.ref), clk)
+			dir := directionFromCompare(base, p.ref)
+			if base.Before(p.ref) {
+				base = base.AddDate(0, 0, 1)
+				dir = Future
+			}
+			return Result{Time: base, Truncated: clk.unit, Direction: dir}, true
+		}
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "weekend") {
+			p.lex.next()
+			return Result{Time: weekendStart(p.ref, Present), Truncated: UnitDay, Direction: directionFromCompare(weekendStart(p.ref, Present), p.ref)}, true
+		}
+	}
+	p.lex.reset(mark)
+	return Result{}, false
 }
 
 func (p *parser) parseQuarterDate() (Result, bool) {
@@ -534,6 +774,24 @@ func (p *parser) parseMonthDay() (Result, bool) {
 	return Result{Time: base, Truncated: UnitDay, Direction: directionForDateResult(base, p.ref, hasClock)}, true
 }
 
+func (p *parser) parseBareMonth() (Result, bool) {
+	t := p.lex.peek()
+	if t.kind != tokWord {
+		return Result{}, false
+	}
+	mon, ok := wordToMonth(p.lex.val(t))
+	if !ok {
+		return Result{}, false
+	}
+	p.lex.next()
+	y := p.ref.Year()
+	base := time.Date(y, mon, 1, 0, 0, 0, 0, p.ref.Location())
+	if !base.After(p.ref) {
+		base = time.Date(y+1, mon, 1, 0, 0, 0, 0, p.ref.Location())
+	}
+	return Result{Time: base, Truncated: UnitMonth, Direction: Future}, true
+}
+
 func (p *parser) parseOrdinalOfMonth() (Result, bool) {
 	p.skipWords("remind", "me", "on")
 	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "the") {
@@ -571,6 +829,13 @@ func (p *parser) parseOrdinalOfMonth() (Result, bool) {
 // ── bare time ──────────────────────────────────────────────────────────────
 
 func (p *parser) parseBareTime() (Result, bool) {
+	if clk, ok := p.parseNaturalClockExpr(); ok {
+		base := setClock(startOfDay(p.ref), clk)
+		if !base.After(p.ref) {
+			base = base.AddDate(0, 0, 1)
+		}
+		return Result{Time: base, Truncated: clk.unit, Direction: Future}, true
+	}
 	clk, ok := p.parseClockExpr()
 	if !ok {
 		return Result{}, false
@@ -695,6 +960,20 @@ func (p *parser) parseRecurring() (Result, bool) {
 	switch {
 	case p.lex.wordEq(t, "every"):
 		p.lex.next()
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "other") {
+			p.lex.next()
+			if unit, ok := p.peekUnit(); ok {
+				p.lex.next()
+				recur := Recurrence{Every: unit, Interval: 2}
+				if clk, ok := p.parseAtTime(); ok {
+					recur.At = Clock{Hour: clk.hour, Min: clk.min, Sec: clk.sec}
+					recur.HasAt = true
+				}
+				next := p.nextOccurrence(&recur)
+				return Result{Time: next, Recur: recur, HasRecur: true, Truncated: recur.Every, Direction: Future}, true
+			}
+			return Result{}, false
+		}
 	case p.lex.wordEq(t, "once"):
 		p.lex.next()
 		if p.lex.peek().kind == tokWord {
@@ -723,11 +1002,47 @@ func (p *parser) parseRecurring() (Result, bool) {
 		recur.Interval = 1
 		recur.OnDate = int8(day)
 	} else if p.peekIsQuantity() {
-		if n, unit, ok := p.parseQuantity(); ok {
-			recur.Every = unit
-			recur.Interval = n
+		qmark := p.lex.mark()
+		if n, ok := p.parseOrdinalOrNumber(); ok && n > 0 {
+			if wd, ok := p.peekWeekday(); ok {
+				p.lex.next()
+				recur.Every = UnitMonth
+				recur.Interval = 1
+				recur.OnOrdinal = int8(n)
+				recur.OnDay = weekdayToISO(wd)
+			} else {
+				p.lex.reset(qmark)
+			}
 		} else {
-			return Result{}, false
+			p.lex.reset(qmark)
+		}
+		if recur.Every == UnitNone {
+			if n, unit, ok := p.parseQuantity(); ok {
+				recur.Every = unit
+				recur.Interval = n
+			} else {
+				return Result{}, false
+			}
+		}
+	} else if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "weekday") {
+		p.lex.next()
+		recur.Every = UnitDay
+		recur.Interval = 1
+		recur.OnWeekday = true
+	} else if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "last") && p.lex.peekAt(1).kind == tokWord && p.lex.wordEq(p.lex.peekAt(1), "day") {
+		p.lex.next()
+		p.lex.next()
+		recur.Every = UnitMonth
+		recur.Interval = 1
+		recur.OnDate = -1
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "of") {
+			p.lex.next()
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "the") {
+				p.lex.next()
+			}
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "month") {
+				p.lex.next()
+			}
 		}
 	} else if unit, ok := p.peekUnit(); ok {
 		p.lex.next()
@@ -741,11 +1056,6 @@ func (p *parser) parseRecurring() (Result, bool) {
 		if also, ok := p.parseAndWeekday(); ok {
 			recur.AlsoOnDay = weekdayToISO(also)
 		}
-	} else if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "weekday") {
-		p.lex.next()
-		recur.Every = UnitDay
-		recur.Interval = 1
-		recur.OnWeekday = true
 	} else {
 		return Result{}, false
 	}
@@ -779,6 +1089,32 @@ func (p *parser) parseRecurring() (Result, bool) {
 				return Result{}, false
 			}
 			recur.OnDate = int8(day)
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "of") {
+				p.lex.next()
+				if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "the") {
+					p.lex.next()
+				}
+				if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "month") {
+					p.lex.next()
+				}
+			}
+		} else if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "last") {
+			p.lex.next()
+			if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "day") {
+				p.lex.next()
+				recur.OnDate = -1
+				if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "of") {
+					p.lex.next()
+					if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "the") {
+						p.lex.next()
+					}
+					if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "month") {
+						p.lex.next()
+					}
+				}
+			} else {
+				return Result{}, false
+			}
 		} else {
 			return Result{}, false
 		}
@@ -824,7 +1160,41 @@ func (p *parser) parseRecurring() (Result, bool) {
 		}
 	}
 
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "except") {
+		p.lex.next()
+		if wd, ok := p.peekWeekday(); ok {
+			p.lex.next()
+			recur.ExceptDay = weekdayToISO(wd)
+		} else {
+			return Result{}, false
+		}
+	}
+
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "until") {
+		p.lex.next()
+		if until, ok := p.parseExpr(true); ok {
+			recur.Until = until.Time
+		} else {
+			return Result{}, false
+		}
+	}
+
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "for") {
+		p.lex.next()
+		if n, ok := p.parseNumber(); ok {
+			recur.Count = n
+			if unit, ok := p.peekUnit(); ok && unit == recur.Every {
+				p.lex.next()
+			}
+		} else {
+			return Result{}, false
+		}
+	}
+
 	next := p.nextOccurrence(&recur)
+	if !recur.Until.IsZero() && next.After(recur.Until) {
+		return Result{}, false
+	}
 	return Result{Time: next, Recur: recur, HasRecur: true, Truncated: recur.Every, Direction: Future}, true
 }
 
@@ -859,12 +1229,66 @@ func (p *parser) parseAtTime() (clockResult, bool) {
 			return clockResult{12, 0, 0, UnitHour}, true
 		}
 	}
+	if clk, ok := p.parseNaturalClockExpr(); ok {
+		return clk, true
+	}
 	clk, ok := p.parseClockExpr()
 	if !ok {
 		p.lex.reset(mark)
 		return clockResult{}, false
 	}
 	return clk, true
+}
+
+func (p *parser) parseNaturalClockExpr() (clockResult, bool) {
+	mark := p.lex.mark()
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "quarter") {
+		p.lex.next()
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "past") {
+			p.lex.next()
+			if clk, ok := p.parseClockExpr(); ok {
+				clk.min = 15
+				clk.unit = UnitMinute
+				return clk, true
+			}
+		}
+	}
+	p.lex.reset(mark)
+	if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "half") {
+		p.lex.next()
+		if p.lex.peek().kind == tokWord && p.lex.wordEq(p.lex.peek(), "past") {
+			p.lex.next()
+			if clk, ok := p.parseClockExpr(); ok {
+				clk.min = 30
+				clk.unit = UnitMinute
+				return clk, true
+			}
+		}
+	}
+	p.lex.reset(mark)
+	return clockResult{}, false
+}
+
+func (p *parser) parsePartOfDayClock() (clockResult, bool) {
+	t := p.lex.peek()
+	if t.kind != tokWord {
+		return clockResult{}, false
+	}
+	switch {
+	case p.lex.wordEq(t, "morning"):
+		p.lex.next()
+		return clockResult{9, 0, 0, UnitHour}, true
+	case p.lex.wordEq(t, "afternoon"):
+		p.lex.next()
+		return clockResult{15, 0, 0, UnitHour}, true
+	case p.lex.wordEq(t, "evening"):
+		p.lex.next()
+		return clockResult{18, 0, 0, UnitHour}, true
+	case p.lex.wordEq(t, "night"):
+		p.lex.next()
+		return clockResult{20, 0, 0, UnitHour}, true
+	}
+	return clockResult{}, false
 }
 
 func (p *parser) parseClockExpr() (clockResult, bool) {
@@ -1118,6 +1542,12 @@ func (p *parser) withTokenMatch(r Result, startToken int) Result {
 	if p.lex.pos > 0 && p.lex.pos-1 < p.lex.n {
 		end = p.lex.tokens[p.lex.pos-1].hi
 	}
+	if r.Confidence == 0 && p.mode != ModeStrict {
+		r.Confidence = 0.8
+		if p.mode == ModeFuzzy {
+			r.Confidence = 0.6
+		}
+	}
 	return withMatch(r, p.src, start, end)
 }
 
@@ -1276,6 +1706,9 @@ func nextOccurrenceFrom(ref time.Time, r *Recurrence) time.Time {
 		}
 		return applyClock(startOfYear(ref).AddDate(r.Interval, 0, 0), r.At, r.HasAt)
 	case UnitQuarter:
+		if r.OnDate != 0 {
+			return nextQuarterlyDateOccurrence(ref, r)
+		}
 		t := applyClock(startOfQuarter(ref), r.At, r.HasAt)
 		if t.After(ref) {
 			return t
@@ -1319,7 +1752,7 @@ func nextWeekdayOccurrence(ref time.Time, r *Recurrence) time.Time {
 	base := startOfDay(ref)
 	for i := 0; i < 14; i++ {
 		t := applyClock(base.AddDate(0, 0, i), r.At, r.HasAt)
-		if t.After(ref) && t.Weekday() != time.Saturday && t.Weekday() != time.Sunday {
+		if t.After(ref) && t.Weekday() != time.Saturday && t.Weekday() != time.Sunday && weekdayToISO(t.Weekday()) != r.ExceptDay {
 			return t
 		}
 	}
@@ -1329,10 +1762,33 @@ func nextWeekdayOccurrence(ref time.Time, r *Recurrence) time.Time {
 func nextMonthlyDateOccurrence(ref time.Time, r *Recurrence) time.Time {
 	for monthOffset := 0; monthOffset <= r.Interval*120; monthOffset += r.Interval {
 		t := startOfMonth(ref).AddDate(0, monthOffset, 0)
-		if !validMonthDay(t.Year(), t.Month(), int(r.OnDate)) {
+		day := int(r.OnDate)
+		if r.OnDate == -1 {
+			day = daysInMonth(t.Year(), t.Month())
+		}
+		if !validMonthDay(t.Year(), t.Month(), day) {
 			continue
 		}
-		t = time.Date(t.Year(), t.Month(), int(r.OnDate), 0, 0, 0, 0, ref.Location())
+		t = time.Date(t.Year(), t.Month(), day, 0, 0, 0, 0, ref.Location())
+		t = applyClock(t, r.At, r.HasAt)
+		if t.After(ref) {
+			return t
+		}
+	}
+	return ref
+}
+
+func nextQuarterlyDateOccurrence(ref time.Time, r *Recurrence) time.Time {
+	for monthOffset := 0; monthOffset <= r.Interval*120; monthOffset += r.Interval * 3 {
+		q := startOfQuarter(ref).AddDate(0, monthOffset, 0)
+		day := int(r.OnDate)
+		if r.OnDate == -1 {
+			day = daysInMonth(q.Year(), q.Month())
+		}
+		if !validMonthDay(q.Year(), q.Month(), day) {
+			continue
+		}
+		t := time.Date(q.Year(), q.Month(), day, 0, 0, 0, 0, ref.Location())
 		t = applyClock(t, r.At, r.HasAt)
 		if t.After(ref) {
 			return t
@@ -1398,6 +1854,9 @@ func nextYearlyOccurrence(ref time.Time, r *Recurrence) time.Time {
 		day = 1
 	}
 	for y := ref.Year(); y <= ref.Year()+r.Interval*32; y += r.Interval {
+		if r.OnDate == -1 {
+			day = daysInMonth(y, month)
+		}
 		if !validMonthDay(y, month, day) {
 			continue
 		}
@@ -1463,6 +1922,48 @@ func periodStart(t time.Time, unit Unit) time.Time {
 	default:
 		return t
 	}
+}
+
+func fiscalPeriodStart(t time.Time, unit Unit, dir Direction, startMonth time.Month) time.Time {
+	if startMonth < time.January || startMonth > time.December {
+		startMonth = time.January
+	}
+	fyStartYear := t.Year()
+	if t.Month() < startMonth {
+		fyStartYear--
+	}
+	fyStart := time.Date(fyStartYear, startMonth, 1, 0, 0, 0, 0, t.Location())
+	if unit == UnitYear {
+		switch dir {
+		case Past:
+			return fyStart.AddDate(-1, 0, 0)
+		case Future:
+			return fyStart.AddDate(1, 0, 0)
+		default:
+			return fyStart
+		}
+	}
+	monthsSinceStart := (int(t.Month()) - int(startMonth) + 12) % 12
+	currentQuarter := monthsSinceStart / 3
+	qStart := fyStart.AddDate(0, currentQuarter*3, 0)
+	switch dir {
+	case Past:
+		return qStart.AddDate(0, -3, 0)
+	case Future:
+		return qStart.AddDate(0, 3, 0)
+	default:
+		return qStart
+	}
+}
+
+func fiscalPeriodEnd(start time.Time, unit Unit) time.Time {
+	if unit == UnitYear {
+		return start.AddDate(1, 0, 0).Add(-time.Nanosecond)
+	}
+	if unit == UnitQuarter {
+		return start.AddDate(0, 3, 0).Add(-time.Nanosecond)
+	}
+	return periodEnd(start, unit)
 }
 
 func periodEnd(t time.Time, unit Unit) time.Time {
@@ -1546,6 +2047,72 @@ func atoi(s string) int {
 func startOfWeek(t time.Time) time.Time {
 	daysBack := int(t.Weekday())
 	return startOfDay(t).AddDate(0, 0, -daysBack)
+}
+
+func daysInMonth(year int, month time.Month) int {
+	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}
+
+func addWeekdays(t time.Time, n int) time.Time {
+	if n == 0 {
+		return t
+	}
+	current := t
+	direction := 1
+	if n < 0 {
+		direction = -1
+		n = -n
+	}
+	for steps := 0; steps < n; {
+		current = current.AddDate(0, 0, direction)
+		if current.Weekday() != time.Saturday && current.Weekday() != time.Sunday {
+			steps++
+		}
+	}
+	return current
+}
+
+func addBusinessWeeks(t time.Time, n int, holidays []time.Time, weekends []time.Weekday) time.Time {
+	return addBusinessDays(t, n*5, holidays, weekends)
+}
+
+func nthWeekdayFrom(ref time.Time, wd time.Weekday, n int, dir Direction) time.Time {
+	if n < 1 {
+		n = 1
+	}
+	current := ref
+	step := 1
+	if dir == Past {
+		step = -1
+	}
+	for seen := 0; seen < n; {
+		current = current.AddDate(0, 0, step)
+		if current.Weekday() == wd {
+			seen++
+		}
+	}
+	return startOfDay(current)
+}
+
+func weekendStart(ref time.Time, dir Direction) time.Time {
+	base := startOfDay(ref)
+	switch dir {
+	case Past:
+		days := (int(base.Weekday()) - int(time.Saturday) + 7) % 7
+		if days == 0 {
+			days = 7
+		}
+		return base.AddDate(0, 0, -days)
+	case Present:
+		days := (int(time.Saturday) - int(base.Weekday()) + 7) % 7
+		return base.AddDate(0, 0, days)
+	default:
+		days := (int(time.Saturday) - int(base.Weekday()) + 7) % 7
+		if days == 0 {
+			days = 7
+		}
+		return base.AddDate(0, 0, days)
+	}
 }
 
 func endOfWeek(t time.Time) time.Time {

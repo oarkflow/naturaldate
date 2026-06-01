@@ -118,16 +118,26 @@ func firstOptions(opts []Options) Options {
 func normalizeOptions(options Options) Options {
 	loc := options.Location
 	if options.Reference.IsZero() {
+		now := time.Now
+		if options.Now != nil {
+			now = options.Now
+		}
 		if loc != nil {
-			options.Reference = time.Now().In(loc)
+			options.Reference = now().In(loc)
 		} else {
-			options.Reference = time.Now()
+			options.Reference = now()
 		}
 	} else if loc != nil {
 		options.Reference = options.Reference.In(loc)
 	}
 	if options.WeekdayDir == 0 {
 		options.WeekdayDir = Past
+	}
+	if options.BusinessDayEnd == (Clock{}) {
+		options.BusinessDayEnd = Clock{Hour: 17}
+	}
+	if options.FiscalYearStartMonth == 0 {
+		options.FiscalYearStartMonth = time.January
 	}
 	return options
 }

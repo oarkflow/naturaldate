@@ -19,14 +19,15 @@ const (
 
 // Result holds a parsed date/time along with metadata.
 type Result struct {
-	Time      time.Time
-	Recur     Recurrence // valid when HasRecur is true
-	HasRecur  bool
-	Direction Direction
-	Truncated Unit // finest unit mentioned (e.g. Hour for "10am")
-	Start     int  // byte offset of the matched expression
-	End       int  // byte offset immediately after the matched expression
-	Text      string
+	Time       time.Time
+	Recur      Recurrence // valid when HasRecur is true
+	HasRecur   bool
+	Direction  Direction
+	Truncated  Unit // finest unit mentioned (e.g. Hour for "10am")
+	Start      int  // byte offset of the matched expression
+	End        int  // byte offset immediately after the matched expression
+	Text       string
+	Confidence float64 // 1.0 for deterministic parses; lower for fuzzy/casual matches
 }
 
 // Unit represents a calendar/time granularity.
@@ -100,11 +101,14 @@ type Recurrence struct {
 	At        Clock
 	HasAt     bool
 	OnDay     int8 // 0=any, 1=Mon … 7=Sun (ISO)
-	OnDate    int8 // day-of-month anchor (0=none)
+	OnDate    int8 // day-of-month anchor (0=none, -1=last day)
 	OnMonth   int8 // month anchor (0=none)
 	OnOrdinal int8 // nth occurrence: 1=first, 2=second, ..., -1=last
 	OnWeekday bool // every weekday
 	AlsoOnDay int8 // optional second weekday for "monday and wednesday"
+	ExceptDay int8 // optional weekday exclusion for "every weekday except friday"
+	Until     time.Time
+	Count     int
 }
 
 // Clock is an optional time-of-day value stored without heap allocation.
@@ -114,6 +118,10 @@ type Clock struct {
 
 // Options configures parsing behaviour.
 type Options struct {
+	// Now returns the default reference time when Reference is zero.
+	// Defaults to time.Now.
+	Now func() time.Time
+
 	// Reference is the "now" moment used for relative expressions.
 	// Defaults to time.Now() when zero.
 	Reference time.Time
@@ -131,12 +139,20 @@ type Options struct {
 	AllowEmbedded bool
 
 	// Holidays is a list of dates to skip when calculating business days.
-	// Each date should be in the format "YYYY-MM-DD" or as time.Time values.
+	// Each date is compared by calendar day in the parser location.
 	Holidays []time.Time
 
 	// WeekendDays configures non-working weekdays for business-day expressions.
 	// Defaults to Saturday and Sunday.
 	WeekendDays []time.Weekday
+
+	// BusinessDayEnd is the clock used for COB/EOD expressions.
+	// Defaults to 17:00.
+	BusinessDayEnd Clock
+
+	// FiscalYearStartMonth configures fiscal quarter/year parsing.
+	// Defaults to January.
+	FiscalYearStartMonth time.Month
 
 	// DateOrder controls ambiguous numeric dates. Default keeps the historic
 	// behavior: slash prefers MM/DD, dash and dot prefer DD/MM.
@@ -193,6 +209,24 @@ func ParseWithError(s string, opts ...Options) (Result, error) {
 		return Result{}, &ParseError{Input: s, Kind: ErrTrailingInput, Pos: pos}
 	}
 	return Result{}, &ParseError{Input: s, Kind: ErrInvalidExpression}
+}
+
+// ParseAllWithError extracts every date/time expression found in s and returns
+// a structured error when none can be found.
+func ParseAllWithError(s string, opts ...Options) ([]Result, error) {
+	results := ParseAll(s, opts...)
+	if len(results) > 0 {
+		return results, nil
+	}
+	options := normalizeOptions(firstOptions(opts))
+	trimmed := trimSpaceASCII(s)
+	if trimmed == "" {
+		return nil, &ParseError{Input: s, Kind: ErrEmptyInput}
+	}
+	if pos, ok := firstTrailingPos(s, options); ok {
+		return nil, &ParseError{Input: s, Kind: ErrTrailingInput, Pos: pos}
+	}
+	return nil, &ParseError{Input: s, Kind: ErrInvalidExpression}
 }
 
 func parseInternal(s string, options Options) (Result, bool, string) {
@@ -273,6 +307,9 @@ func withMatch(r Result, src string, start, end int) Result {
 	r.Start = start
 	r.End = end
 	r.Text = src[start:end]
+	if r.Confidence == 0 {
+		r.Confidence = 1
+	}
 	return r
 }
 

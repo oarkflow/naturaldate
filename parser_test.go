@@ -734,3 +734,139 @@ func TestParseNewRecurringForms(t *testing.T) {
 		t.Fatalf("unexpected monthly date recurrence: %+v ok=%v", r, ok)
 	}
 }
+
+func TestParseAdditionalNaturalFormats(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+
+	cases := []struct {
+		name  string
+		input string
+		opts  Options
+		want  time.Time
+	}{
+		{"next weekdays", "next 3 weekdays", Options{Reference: ref}, time.Date(2026, time.March, 19, 15, 4, 5, 0, time.UTC)},
+		{"business weeks", "last 2 business weeks", Options{Reference: ref}, time.Date(2026, time.March, 2, 15, 4, 5, 0, time.UTC)},
+		{"tomorrow morning", "tomorrow morning", Options{Reference: ref}, time.Date(2026, time.March, 17, 9, 0, 0, 0, time.UTC)},
+		{"next friday evening", "next friday evening", Options{Reference: ref}, time.Date(2026, time.March, 20, 18, 0, 0, 0, time.UTC)},
+		{"tonight", "tonight", Options{Reference: ref}, time.Date(2026, time.March, 16, 20, 0, 0, 0, time.UTC)},
+		{"eod", "EOD", Options{Reference: ref}, time.Date(2026, time.March, 16, 17, 0, 0, 0, time.UTC)},
+		{"half hour", "in half an hour", Options{Reference: ref}, time.Date(2026, time.March, 16, 15, 34, 5, 0, time.UTC)},
+		{"quarter past", "quarter past 5", Options{Reference: ref}, time.Date(2026, time.March, 17, 5, 15, 0, 0, time.UTC)},
+		{"half past", "half past 3", Options{Reference: ref}, time.Date(2026, time.March, 17, 3, 30, 0, 0, time.UTC)},
+		{"nth weekday future", "2 Mondays from now", Options{Reference: ref}, time.Date(2026, time.March, 30, 0, 0, 0, 0, time.UTC)},
+		{"nth weekday past", "3 Fridays ago", Options{Reference: ref}, time.Date(2026, time.February, 27, 0, 0, 0, 0, time.UTC)},
+		{"day after tomorrow", "the day after tomorrow", Options{Reference: ref}, time.Date(2026, time.March, 18, 0, 0, 0, 0, time.UTC)},
+		{"day before yesterday", "the day before yesterday", Options{Reference: ref}, time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)},
+		{"next weekend", "next weekend", Options{Reference: ref}, time.Date(2026, time.March, 21, 0, 0, 0, 0, time.UTC)},
+		{"fiscal quarter", "next fiscal quarter", Options{Reference: ref, FiscalYearStartMonth: time.April}, time.Date(2026, time.April, 1, 0, 0, 0, 0, time.UTC)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := Parse(tc.input, tc.opts)
+			if !ok {
+				t.Fatalf("expected parse success")
+			}
+			if !r.Time.Equal(tc.want) {
+				t.Fatalf("time mismatch: got %v want %v", r.Time, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseAdditionalRanges(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+
+	cases := []struct {
+		input string
+		wantS time.Time
+		wantE time.Time
+	}{
+		{"month to date", time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC), ref},
+		{"last week to date", time.Date(2026, time.March, 8, 0, 0, 0, 0, time.UTC), ref},
+		{"previous 30 days", ref.AddDate(0, 0, -30), ref},
+		{"from now until friday", ref, time.Date(2026, time.March, 21, 0, 0, 0, 0, time.UTC)},
+		{"between tomorrow and next monday", time.Date(2026, time.March, 17, 0, 0, 0, 0, time.UTC), time.Date(2026, time.March, 24, 0, 0, 0, 0, time.UTC)},
+		{"week of March 15", time.Date(2026, time.March, 15, 0, 0, 0, 0, time.UTC), time.Date(2026, time.March, 22, 0, 0, 0, 0, time.UTC)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			r, ok := ParseRange(tc.input, Options{Reference: ref})
+			if !ok {
+				t.Fatalf("expected range parse success")
+			}
+			if !r.Start.Equal(tc.wantS) || !r.End.Equal(tc.wantE) {
+				t.Fatalf("range mismatch: got %v..%v want %v..%v", r.Start, r.End, tc.wantS, tc.wantE)
+			}
+		})
+	}
+}
+
+func TestParseAdditionalRecurrences(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+
+	cases := []struct {
+		input string
+		want  time.Time
+		check func(*testing.T, Result)
+	}{
+		{"every other day", time.Date(2026, time.March, 18, 0, 0, 0, 0, time.UTC), nil},
+		{"every 3rd Friday", time.Date(2026, time.March, 20, 0, 0, 0, 0, time.UTC), nil},
+		{"every weekday at 9am except Friday", time.Date(2026, time.March, 17, 9, 0, 0, 0, time.UTC), func(t *testing.T, r Result) {
+			if r.Recur.ExceptDay != 5 {
+				t.Fatalf("expected Friday exclusion, got %+v", r.Recur)
+			}
+		}},
+		{"every Monday until June", time.Date(2026, time.March, 23, 0, 0, 0, 0, time.UTC), func(t *testing.T, r Result) {
+			if r.Recur.Until.IsZero() {
+				t.Fatalf("expected until bound")
+			}
+		}},
+		{"every day for 10 days", time.Date(2026, time.March, 17, 0, 0, 0, 0, time.UTC), func(t *testing.T, r Result) {
+			if r.Recur.Count != 10 {
+				t.Fatalf("expected count 10, got %+v", r.Recur)
+			}
+		}},
+		{"every month on the last day", time.Date(2026, time.March, 31, 0, 0, 0, 0, time.UTC), nil},
+		{"every quarter on the 15th", time.Date(2026, time.April, 15, 0, 0, 0, 0, time.UTC), nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			r, ok := Parse(tc.input, Options{Reference: ref})
+			if !ok || !r.HasRecur {
+				t.Fatalf("expected recurring parse, got ok=%v result=%+v", ok, r)
+			}
+			if !r.Time.Equal(tc.want) {
+				t.Fatalf("time mismatch: got %v want %v", r.Time, tc.want)
+			}
+			if tc.check != nil {
+				tc.check(t, r)
+			}
+		})
+	}
+}
+
+func TestNewErrorAPIsAndOptions(t *testing.T) {
+	ref := time.Date(2026, time.March, 16, 15, 4, 5, 0, time.UTC)
+	results, err := ParseAllWithError("ship tomorrow and friday", Options{Reference: ref})
+	if err != nil || len(results) != 2 {
+		t.Fatalf("ParseAllWithError mismatch: len=%d err=%v", len(results), err)
+	}
+	if _, err := ParseAllWithError("", Options{Reference: ref}); err == nil {
+		t.Fatalf("expected empty error")
+	}
+	if _, err := ParseRangeWithError("not a range", Options{Reference: ref}); err == nil {
+		t.Fatalf("expected range error")
+	}
+	r, ok := Parse("now", Options{Now: func() time.Time { return ref }})
+	if !ok || !r.Time.Equal(ref) {
+		t.Fatalf("Now option mismatch: %+v ok=%v", r, ok)
+	}
+	customEnd := Clock{Hour: 18, Min: 30}
+	r, ok = Parse("COB", Options{Reference: ref, BusinessDayEnd: customEnd})
+	if !ok || !r.Time.Equal(time.Date(2026, time.March, 16, 18, 30, 0, 0, time.UTC)) {
+		t.Fatalf("BusinessDayEnd mismatch: %+v ok=%v", r, ok)
+	}
+}

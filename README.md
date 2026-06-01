@@ -23,6 +23,7 @@ A high-performance, zero-allocation Go library for parsing natural language date
 - **Embedded dates** - Extract dates from within larger text strings
 - **Date ranges and durations** - Parse reporting windows and mixed calendar durations
 - **Detailed errors and match spans** - Opt into structured failures and source offsets
+- **Business and fiscal calendars** - Configure weekends, holidays, business-day end, and fiscal year starts
 
 ## Installation
 
@@ -84,6 +85,13 @@ func main() {
 | `in 2 weeks` | 2 weeks after reference |
 | `in 5 business days` | 5 weekdays after reference, skipping configured holidays |
 | `next business day` | Next configured working day |
+| `next 3 weekdays` | 3 weekdays after reference |
+| `last 2 business weeks` | 10 configured business days before reference |
+| `in half an hour` | 30 minutes after reference |
+| `the day after tomorrow` | 2 days after today |
+| `the day before yesterday` | 2 days before today |
+| `2 Mondays from now` | Second Monday after reference |
+| `3 Fridays ago` | Third Friday before reference |
 
 ### Weekday References
 
@@ -95,6 +103,8 @@ func main() {
 | `sunday` | Nearest Sunday (configurable direction) |
 | `monday at 10am` | Next Monday at 10:00 |
 | `last sunday at 5:30pm` | Last Sunday at 17:30 |
+| `friday evening` | Friday at 18:00 |
+| `next weekend` | Start of the next Saturday |
 
 ### Month/Year References
 
@@ -103,6 +113,7 @@ func main() {
 | `last month` | First day of previous month |
 | `next month` | First day of next month |
 | `next quarter` | First day of next quarter |
+| `next fiscal quarter` | First day of the next configured fiscal quarter |
 | `last january` | January of previous year (if past) |
 | `next december` | December of next year |
 | `last february` | February of current or previous year |
@@ -124,6 +135,12 @@ func main() {
 | `10am` | 10:00 of next day |
 | `10:05pm` | 22:05 of current/next day |
 | `10:05:22pm` | 22:05:22 |
+| `quarter past 5` | 05:15 of current/next day |
+| `half past 3` | 03:30 of current/next day |
+| `tomorrow morning` | Tomorrow at 09:00 |
+| `this afternoon` | Today/tomorrow at 15:00 |
+| `tonight` | Today/tomorrow at 20:00 |
+| `EOD` / `COB` | Configured business-day end, default 17:00 |
 | `midnight` | 00:00 of current day |
 | `noon` | 12:00 of current day |
 
@@ -154,6 +171,13 @@ func main() {
 | `once a month on friday midnight` | Monthly on Friday at midnight |
 | `every first monday of the month` | First Monday of each month |
 | `every last friday of the month` | Last Friday of each month |
+| `every other day` | Every 2 days |
+| `every 3rd Friday` | Third Friday of each month |
+| `every weekday at 9am except Friday` | Weekdays except Friday at 09:00 |
+| `every Monday until June` | Weekly with an end bound |
+| `every day for 10 days` | Daily with a count bound |
+| `every month on the last day` | Monthly on the month end |
+| `every quarter on the 15th` | Quarterly on the first month's 15th |
 
 ### Timezones
 
@@ -179,6 +203,9 @@ func main() {
 - **Relative suffixes**: `ago` means past. `from` is accepted only as `from now` or `from today`; incomplete forms like `5 days from` are rejected.
 - **Business days**: business-day expressions skip Saturdays, Sundays, and any dates in `Options.Holidays`.
 - **Custom weekends**: set `Options.WeekendDays` when your working week differs from Monday-Friday.
+- **Parts of day**: `morning`, `afternoon`, `evening`, and `tonight` resolve to 09:00, 15:00, 18:00, and 20:00.
+- **Business-day end**: `EOD`, `COB`, and `end of business day` use `Options.BusinessDayEnd`, defaulting to 17:00.
+- **Fiscal periods**: fiscal quarter/year expressions use `Options.FiscalYearStartMonth`, defaulting to January.
 - **Date order**: set `Options.DateOrder` to force MDY, DMY, or YMD parsing for ambiguous numeric dates.
 - **Recurrences**: recurring parses return the first occurrence strictly after the reference time. `Result.Next(after)` also returns the first occurrence strictly after `after`.
 - **Invalid values**: invalid calendar dates, invalid clock values, zero recurrence intervals, and unsupported trailing words are rejected.
@@ -224,6 +251,7 @@ Returns a structured `*ParseError` with a failure kind such as empty input, inva
 
 ```go
 func ParseAll(s string, opts ...Options) []Result
+func ParseAllWithError(s string, opts ...Options) ([]Result, error)
 func AppendAll(dst []Result, s string, opts ...Options) []Result
 ```
 
@@ -239,6 +267,7 @@ Each `Result` includes `Start`, `End`, and `Text` metadata for the matched sourc
 
 ```go
 func ParseRange(s string, opts ...Options) (DateRange, bool)
+func ParseRangeWithError(s string, opts ...Options) (DateRange, error)
 ```
 
 Parses reporting/scheduling ranges. `DateRange.Start` is inclusive and `DateRange.End` is exclusive.
@@ -246,6 +275,7 @@ Parses reporting/scheduling ranges. `DateRange.Start` is inclusive and `DateRang
 ```go
 window, ok := naturaldate.ParseRange("last 7 days", opts)
 quarter, ok := naturaldate.ParseRange("Q1 2026", opts)
+mtd, err := naturaldate.ParseRangeWithError("month to date", opts)
 ```
 
 ### ParseDuration
@@ -275,6 +305,9 @@ next, ok := result.Next(time.Now())
 
 ```go
 type Options struct {
+    // Now returns the default reference time when Reference is zero.
+    Now func() time.Time
+
     // Reference is the "now" moment used for relative expressions.
     // Defaults to time.Now() when zero.
     Reference time.Time
@@ -297,6 +330,12 @@ type Options struct {
     // WeekendDays configures non-working weekdays for business-day expressions.
     WeekendDays []time.Weekday
 
+    // BusinessDayEnd is the clock used for COB/EOD expressions.
+    BusinessDayEnd Clock
+
+    // FiscalYearStartMonth configures fiscal quarter/year parsing.
+    FiscalYearStartMonth time.Month
+
     // DateOrder controls ambiguous numeric dates.
     DateOrder DateOrder
 
@@ -317,6 +356,7 @@ type Result struct {
     Start     int          // Byte offset of the matched expression
     End       int          // Byte offset immediately after the match
     Text      string       // Matched source text
+    Confidence float64     // 1.0 for deterministic parses
 }
 ```
 
@@ -360,6 +400,7 @@ result, ok := naturaldate.Parse("restart the server in 5 days from now", opts)
 
 ## Production Notes
 
+- Parsing is deterministic and English-focused.
 - Invalid calendar dates are rejected rather than normalized.
 - Long embedded inputs are supported with fixed-size token storage and no heap allocations.
 - CI runs tests and `go vet` on the oldest supported Go version and the current stable release.
@@ -370,14 +411,10 @@ MIT
 
 ## Performance
 
-The library is designed for zero-allocation, high-performance parsing. All state is stored on the stack using fixed-size arrays. Here's a quick benchmark:
+The library is designed for zero-allocation, high-performance parsing. All state is stored on the stack using fixed-size arrays. Run benchmarks on your target hardware with:
 
-```go
-// Benchmark results on modern hardware
-// BenchmarkParseNow-16        100000000         10.5 ns/op
-// BenchmarkParseTime-16        100000000         12.1 ns/op
-// BenchmarkParseEmbedded-16    50000000          25.3 ns/op
-// BenchmarkParseRecurring-16   50000000          28.7 ns/op
+```bash
+go test -bench=. -benchmem ./...
 ```
 
 ## Error Handling

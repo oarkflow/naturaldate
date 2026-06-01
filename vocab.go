@@ -68,19 +68,19 @@ func wordToInt(s string) (int, bool) {
 // Returns (wd, true) on match.
 func wordToWeekday(s string) (time.Weekday, bool) {
 	switch {
-	case eqLower(s, "monday") || eqLower(s, "mon"):
+	case eqLower(s, "monday") || eqLower(s, "mondays") || eqLower(s, "mon"):
 		return time.Monday, true
-	case eqLower(s, "tuesday") || eqLower(s, "tue") || eqLower(s, "tues"):
+	case eqLower(s, "tuesday") || eqLower(s, "tuesdays") || eqLower(s, "tue") || eqLower(s, "tues"):
 		return time.Tuesday, true
-	case eqLower(s, "wednesday") || eqLower(s, "wed"):
+	case eqLower(s, "wednesday") || eqLower(s, "wednesdays") || eqLower(s, "wed"):
 		return time.Wednesday, true
-	case eqLower(s, "thursday") || eqLower(s, "thu") || eqLower(s, "thur") || eqLower(s, "thurs"):
+	case eqLower(s, "thursday") || eqLower(s, "thursdays") || eqLower(s, "thu") || eqLower(s, "thur") || eqLower(s, "thurs"):
 		return time.Thursday, true
-	case eqLower(s, "friday") || eqLower(s, "fri"):
+	case eqLower(s, "friday") || eqLower(s, "fridays") || eqLower(s, "fri"):
 		return time.Friday, true
-	case eqLower(s, "saturday") || eqLower(s, "sat"):
+	case eqLower(s, "saturday") || eqLower(s, "saturdays") || eqLower(s, "sat"):
 		return time.Saturday, true
-	case eqLower(s, "sunday") || eqLower(s, "sun"):
+	case eqLower(s, "sunday") || eqLower(s, "sundays") || eqLower(s, "sun"):
 		return time.Sunday, true
 	}
 	return 0, false
